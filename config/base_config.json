@@ -1,0 +1,30 @@
+{
+  "PTS_COUNT": 600,
+  "device": {
+    "cuda": "cuda:0"
+  },
+  "dtype": {
+    "numpy": "float32",
+    "torch": "float32"
+  },
+  "model": {
+    "shape_encoder": {
+      "input_dim": 6,
+      "output_dim": 1024
+    },
+    "pos_encoder": {
+      "input_dim": 3,
+      "output_dim": 1024
+    }
+  },
+  "field": {
+    "resolution": 64,
+    "bbox": [[-1, 1], [-1, 1], [-1, 1]]
+  },
+  "query": {
+    "k_neighbors": 8
+  },
+  "data": {
+    "save_path": "D:/WorkData/iSDF/input/segments/processed/"
+  }
+}

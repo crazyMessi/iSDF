@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=42", "wheel", "pybind11>=2.5.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mesh_partition_module"
+version = "0.0.1"
+description = "A C++ mesh partitioning module with Python bindings"
+readme = "README.md"
+requires-python = ">=3.6"
+license = {text = "MIT"}
+authors = [
+    {name = "User", email = "user@example.com"}
+]
+dependencies = [
+    "numpy",
+    "pybind11>=2.5.0",
+]
+
+[project.optional-dependencies]
+vis = ["matplotlib"]
+examples = ["matplotlib", "scipy"]
+
+[tool.setuptools]
+package-dir = {""="."}
+
+[tool.setuptools.packages.find]
+exclude = ["build*", "dist*", "docs*", "tests*"] 

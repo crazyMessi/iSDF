@@ -1,0 +1,11 @@
+{
+  "test": {
+    "checkpoint_path": "checkpoints/checkpoint_epoch_5.pt",
+    "point_cloud_path1": "D:/WorkData/iSDF/input/scene0001_giveup/ply/",
+    "point_cloud_path": "D:/WorkData/iSDF/input/segments/cleaned/",
+    "resolution": 128,
+    "batch_size": 4096,
+    "output_dir": "D:/WorkData/iSDF/test_results/scene0001_giveup/",
+    "voxel_output_dir": null
+  }
+}

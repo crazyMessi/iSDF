@@ -1,0 +1,99 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+env/
+ENV/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Model checkpoints and data
+checkpoints/
+*.pt
+*.pth
+*.ckpt
+*.h5
+*.hdf5
+*.pb
+*.onnx
+
+# Logs and databases
+*.log
+*.sql
+*.sqlite
+
+# Rendered images & temp files
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+*.tif
+*.tiff
+*.exr
+*.hdr
+*.obj
+*.mtl
+*.fbx
+**/temp/
+**/tmp/
+
+# Compiled C/C++ files
+*.out
+*.o
+*.so
+*.dll
+*.dylib
+*.a
+*.la
+*.lo
+
+# CMake
+CMakeCache.txt
+CMakeFiles
+CMakeScripts
+Testing
+Makefile
+cmake_install.cmake
+install_manifest.txt
+compile_commands.json
+CTestTestfile.cmake
+_deps
+
+# Polyscope cache
+.polyscope.ini
+imgui.ini
+
+# Special files
+.DS_Store
+.env
+.env.*
+.coverage
+htmlcov/ 
