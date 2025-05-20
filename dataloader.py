@@ -11,6 +11,10 @@ import json
 from dtype_utils import get_numpy_dtype, get_torch_dtype, numpy_to_tensor
 
 
+
+config = json.load(open("config/base_config.json"))
+PTS_COUNT = config["PTS_COUNT"]
+
 class PointCloudDataset(Dataset):    
     def __init__(self, data_path, transform=None):
         """
@@ -52,12 +56,6 @@ class TriangleMeshDataset(Dataset):
         faces = np.asarray(mesh.faces, dtype=get_numpy_dtype())
         normals = np.asarray(mesh.vertex_normals, dtype=get_numpy_dtype())
         return vertices, normals, faces
-
-
-
-
-config = json.load(open("config.json"))
-PTS_COUNT = config["PTS_COUNT"]
 
 
 
@@ -186,13 +184,13 @@ class QueryPointsDataset(Dataset):
         mask = np.zeros(self.pts.shape[0], dtype=get_numpy_dtype())
         mask[idxs] = 1
         
-        # 转换为torch张量，并确保数据类型一致
-        torch_dtype = get_torch_dtype()
-        points = torch.tensor(points, dtype=torch_dtype).to(self.device)
-        normals = torch.tensor(normals, dtype=torch_dtype).to(self.device)
-        if type(self.fileDataset) == TriangleMeshDataset:
-            faces = torch.tensor(self.faces_list[idx], dtype=torch_dtype).to(self.device)
-        mask = torch.tensor(mask, dtype=torch_dtype).to(self.device)
+        # # 转换为torch张量，并确保数据类型一致
+        # torch_dtype = get_torch_dtype()
+        # points = torch.tensor(points, dtype=torch_dtype).to(self.device)
+        # normals = torch.tensor(normals, dtype=torch_dtype).to(self.device)
+        # if type(self.fileDataset) == TriangleMeshDataset:
+        #     faces = torch.tensor(self.faces_list[idx], dtype=torch_dtype).to(self.device)
+        # mask = torch.tensor(mask, dtype=torch_dtype).to(self.device)
 
         if type(self.fileDataset) == TriangleMeshDataset:
             return points, normals, mask, faces
@@ -234,9 +232,6 @@ class QueryPointsDatasetMix(Dataset):
 
         for i in range(len(query_points_dataset)):
             points, normals, mask = query_points_dataset[i]
-            points = points.cpu().numpy()
-            normals = normals.cpu().numpy()
-            mask = mask.cpu().numpy()
             qp = pts[mask==1]   
             self.query_points.append(np.concatenate((qp,np.ones((qp.shape[0],1))*i),axis=1))
             tree = cKDTree(points)
@@ -262,8 +257,8 @@ class QueryPointsDatasetMix(Dataset):
     
     def __getitem__(self, idx):
         torch_dtype = get_torch_dtype()
-        query_points = torch.tensor(self.query_points[idx], dtype=torch_dtype).to(self.device)
-        sdistane = torch.tensor(self.sdistane[idx], dtype=torch_dtype).to(self.device)
+        query_points = self.query_points[idx]
+        sdistane = self.sdistane[idx]
         return query_points, sdistane
         
      

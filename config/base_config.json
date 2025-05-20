@@ -15,6 +15,9 @@
     "pos_encoder": {
       "input_dim": 3,
       "output_dim": 1024
+    },
+    "wnf_encoder": {
+      "output_dim": 1024
     }
   },
   "field": {
@@ -23,8 +26,5 @@
   },
   "query": {
     "k_neighbors": 8
-  },
-  "data": {
-    "save_path": "D:/WorkData/iSDF/input/segments/processed/"
   }
 }
