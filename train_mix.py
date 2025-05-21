@@ -4,7 +4,7 @@ import torch.optim as optim
 from tqdm import tqdm
 from network import ShapeFeatureExtractor, SDFDecoder
 from field import SDFField
-from dataloader import PointCloudDataset, QueryPointsDataset, QueryPointsDatasetMix
+from dataloader import PointCloudDataset, QueryPointsDataset, QueryPointsDatasetMix, TriangleMeshDataset
 from torch.utils.data import DataLoader
 import tools
 import numpy as np
@@ -83,11 +83,11 @@ def train(config):
                           lr=config["training"]["learning_rate"])
     
     # Get dataset and dataloader
-    point_cloud_dataset = PointCloudDataset(config["data"]["data_path"])
+    triangle_mesh_dataset = TriangleMeshDataset(config["data"]["data_path"])
     
     # Create QueryPointsDataset
     sample_point_dataset = QueryPointsDataset(
-        pointcloudDataset=point_cloud_dataset,
+        pointcloudDataset=triangle_mesh_dataset,
         resolution=config["field"]["resolution"],
         k=config["query"]["k_neighbors"],
         device=config["device"]["cuda"],
@@ -140,7 +140,7 @@ def train(config):
         WNF_calculators[i].update_normal(all_normals[i])
     
     for i in range(all_points.shape[0]):
-        _, _, mask = sample_point_dataset[i]
+        _, _, mask, _, _ = sample_point_dataset[i]
         mask = torch.from_numpy(mask).to(config["device"]["cuda"],dtype=torch.bool)
         wnf_field = torch.zeros(grid_shape,device=config["device"]["cuda"],dtype=torch_dtype)
         wnf_field[mask.view(grid_shape)] = WNF_calculators[i].query_wn(voxel_grid[mask],batch_size=10000)

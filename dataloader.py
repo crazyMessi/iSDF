@@ -26,7 +26,7 @@ class PointCloudDataset(Dataset):
         self.transform = transform
         self.file_list = [] 
         self.file_list = os.listdir(self.data_path)
-        
+        self.file_list = [f for f in self.file_list if f.endswith('.ply')]
     def __len__(self):
         return len(self.file_list)
     
@@ -44,6 +44,7 @@ class TriangleMeshDataset(Dataset):
         self.transform = transform
         self.file_list = [] 
         self.file_list = os.listdir(self.data_path)
+        self.file_list = [f for f in self.file_list if f.endswith('.ply')]
         
     def __len__(self):
         return len(self.file_list)
@@ -53,7 +54,7 @@ class TriangleMeshDataset(Dataset):
         mesh = o3d.io.read_triangle_mesh(self.data_path + self.file_list[idx])
         mesh.compute_vertex_normals()
         vertices = np.asarray(mesh.vertices, dtype=get_numpy_dtype())
-        faces = np.asarray(mesh.faces, dtype=get_numpy_dtype())
+        faces = np.asarray(mesh.triangles, dtype=np.int32)
         normals = np.asarray(mesh.vertex_normals, dtype=get_numpy_dtype())
         return vertices, normals, faces
 
@@ -81,6 +82,7 @@ class QueryPointsDataset(Dataset):
         self.device = device
         self.point_list = [] # 变化后的每个点云
         self.normal_list = []
+        self.vertices_list = []
         self.faces_list = []
         self._iXForm = [] # 每个点云的逆变换矩阵
         # self.idx_list = [] # 每个点云的索引
@@ -102,7 +104,9 @@ class QueryPointsDataset(Dataset):
                     self._iXForm = [t.astype(numpy_dtype) for t in self._iXForm]
                     if type(self.fileDataset) == TriangleMeshDataset:
                         self.faces_list = np.load(save_path + "faces_list.npy", allow_pickle=True)
-                        self.faces_list = [f.astype(numpy_dtype) for f in self.faces_list]
+                        self.faces_list = [f.astype(np.int32) for f in self.faces_list]
+                        self.vertices_list = np.load(save_path + "vertices_list.npy", allow_pickle=True)
+                        self.vertices_list = [v.astype(numpy_dtype) for v in self.vertices_list]
                     return
             else:
                 dirname = os.path.dirname(save_path)
@@ -127,12 +131,15 @@ class QueryPointsDataset(Dataset):
             points = points.astype(numpy_dtype)
             normals = normals.astype(numpy_dtype)
             
+            points, iXForm = tools.transform_points(points)
+            if type(self.fileDataset) == TriangleMeshDataset:
+                vertices = points.astype(numpy_dtype)
+                faces = faces.astype(np.int32)
+
             # 随机选择PTS_COUNT个点
             idx = np.random.choice(points.shape[0], PTS_COUNT, replace=False)
             points = points[idx]
             normals = normals[idx]
-            
-            points, iXForm = tools.transform_points(points)
             
             # 确保数据类型一致
             points = points.astype(numpy_dtype)
@@ -151,6 +158,7 @@ class QueryPointsDataset(Dataset):
             self._iXForm.append(iXForm)
             if type(self.fileDataset) == TriangleMeshDataset:
                 self.faces_list.append(faces)
+                self.vertices_list.append(vertices)
             idx_list.append(idx)
             
         # 如果提供了保存路径，则保存处理好的数据
@@ -161,6 +169,7 @@ class QueryPointsDataset(Dataset):
             np.save(save_path + "iXForm.npy", np.array(self._iXForm, dtype=object))
             if type(self.fileDataset) == TriangleMeshDataset:
                 np.save(save_path + "faces_list.npy", np.array(self.faces_list, dtype=object))
+                np.save(save_path + "vertices_list.npy", np.array(self.vertices_list, dtype=object))
             np.save(save_path + "idx_list.npy", np.array(idx_list, dtype=object))
             print("Data saved successfully!")
 
@@ -177,6 +186,7 @@ class QueryPointsDataset(Dataset):
         normals = self.normal_list[idx] 
         if type(self.fileDataset) == TriangleMeshDataset:
             faces = self.faces_list[idx]
+            vertices = self.vertices_list[idx]
         # 计算查询点的距离和索引
         dists, idxs = self.kdtree.query(points, k=self.k)
         
@@ -193,13 +203,13 @@ class QueryPointsDataset(Dataset):
         # mask = torch.tensor(mask, dtype=torch_dtype).to(self.device)
 
         if type(self.fileDataset) == TriangleMeshDataset:
-            return points, normals, mask, faces
+            return points, normals, mask, faces, vertices
         else:
             return points, normals, mask
 
 
-
-
+import view
+from pysdf import SDF
 class QueryPointsDatasetMix(Dataset):
     
     def __init__(self,query_points_dataset,save_path=None,device='cpu'):
@@ -231,17 +241,13 @@ class QueryPointsDatasetMix(Dataset):
         pts, _ = tools.create_uniform_grid(resolution=query_points_dataset.resolution)
 
         for i in range(len(query_points_dataset)):
-            points, normals, mask = query_points_dataset[i]
+            _, _, mask, faces, vertices = query_points_dataset[i]
             qp = pts[mask==1]   
             self.query_points.append(np.concatenate((qp,np.ones((qp.shape[0],1))*i),axis=1))
-            tree = cKDTree(points)
-            dists, idxs = tree.query(qp, k=1)
-            npoint = points[idxs]
-            displacement = npoint - qp
-            nnormal = normals[idxs]
-            sign = np.sum(nnormal * displacement, axis=1) < 0 
-            dists[sign<0] = -dists[sign<0]
-            self.sdistane.append(dists)
+            f = SDF(vertices,faces)
+            sdistane = f(qp)
+            self.sdistane.append(sdistane)
+            
             
         
         

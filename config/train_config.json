@@ -1,7 +1,7 @@
 {
   "data": {
-    "data_path": "/mnt/lizd/workdata/iSDF/input/segments/clean_small/",
-    "save_path": "/mnt/lizd/workdata/iSDF/input/segments/clean_small/processed/",
+    "data_path": "/mnt/lizd/workdata/iSDF/mesh_segment/",
+    "save_path": "/mnt/lizd/workdata/iSDF/mesh_segment/processed/",
     "batch_size": 32,
     "shuffle": true,
     "num_workers": 4
