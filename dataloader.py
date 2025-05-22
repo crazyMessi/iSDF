@@ -9,6 +9,7 @@ from scipy.spatial import cKDTree
 from tqdm import tqdm  # 导入tqdm进度条库
 import json
 from dtype_utils import get_numpy_dtype, get_torch_dtype, numpy_to_tensor
+from field import MeshSDF
 
 
 
@@ -244,12 +245,12 @@ class QueryPointsDatasetMix(Dataset):
             _, _, mask, faces, vertices = query_points_dataset[i]
             qp = pts[mask==1]   
             self.query_points.append(np.concatenate((qp,np.ones((qp.shape[0],1))*i),axis=1))
-            f = SDF(vertices,faces)
-            sdistane = f(qp)
-            self.sdistane.append(sdistane)
+            # f = SDF(vertices,faces)
+            # sdistane = f(qp)
+            f = MeshSDF(vertices,faces)
+            sdistane = f.query(qp)
+            self.sdistane.append(sdistane)    
             
-            
-        
         
         self.query_points = np.concatenate(self.query_points,axis=0)
         self.sdistane = np.concatenate(self.sdistane,axis=0)

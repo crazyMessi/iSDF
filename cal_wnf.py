@@ -140,7 +140,7 @@ class WNF:
     Winding Number Field 类
     用于计算和管理点云的 winding number 场
     """
-    def __init__(self, points, epsilon=1e-8):
+    def __init__(self, points, epsilon=1e-8,device=None):
         """
         构造函数
         
@@ -148,7 +148,10 @@ class WNF:
             points: (N, 3) array/tensor - 点云坐标
             epsilon: float - 计算 winding number 时防止除零的小量
         """
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        if device is None:
+            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        else:
+            self.device = device
         
         # 转换输入为 torch tensor
         if not isinstance(points, torch.Tensor):

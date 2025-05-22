@@ -176,9 +176,19 @@ def train(config):
             
             sdf_pred = sdf_decoder(qs_feature) # B x 1
             gt_y = sdistane
+            gt_y[gt_y>0] = 1
+            gt_y[gt_y<0] = -1
+
             
             # Compute loss
             loss = nn.MSELoss()(sdf_pred.squeeze(), gt_y.squeeze())
+            P = (sdf_pred>0).squeeze()
+            N = (sdf_pred<0).squeeze()
+            TP = (P & (gt_y>0)).sum()
+            TN = (N & (gt_y<0)).sum()
+            FP = (P & (gt_y<0)).sum()
+            FN = (N & (gt_y>0)).sum()
+            acc = (TP + TN) / (TP + TN + FP + FN)
             
             # Backward pass
             optimizer.zero_grad()
@@ -186,7 +196,7 @@ def train(config):
             optimizer.step()
             
             if batch_idx % config["training"]["log_interval"] == 0:
-                print(f'Epoch: {epoch}, Batch: {batch_idx}, Loss: {loss.item():.6f}')
+                print(f'Epoch: {epoch}, Batch: {batch_idx}, Loss: {loss.item():.6f}, Acc: {acc:.6f}')
                 
         # Save checkpoint
         if (epoch + 1) % config["training"]["save_interval"] == 0:

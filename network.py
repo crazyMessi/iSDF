@@ -48,7 +48,7 @@ class SparseVoxelEncoder(nn.Module):
         
         # 线性层，用于生成最终特征向量
         self.fc = nn.Linear(512, output_dim)
-        
+        self.activation = nn.Sigmoid()
     def forward(self, x):
         """
         输入:
@@ -61,7 +61,7 @@ class SparseVoxelEncoder(nn.Module):
         
         # 通过全连接层生成最终特征向量
         x = self.fc(x)  # x已经是普通Tensor，不需要.features
-        
+        x = self.activation(x)
         return x
     
     @staticmethod
@@ -187,12 +187,13 @@ class ShapeFeatureExtractor(nn.Module):
         self.bn1 = nn.BatchNorm1d(64)
         self.bn2 = nn.BatchNorm1d(128)
         self.bn3 = nn.BatchNorm1d(1024)
+        self.activation = nn.Sigmoid()
         
         
     def forward(self, x):
-        x = F.relu(self.bn1(self.layer1(x)))
-        x = F.relu(self.bn2(self.layer2(x)))
-        x = F.relu(self.bn3(self.layer3(x)))
+        x = self.activation(self.bn1(self.layer1(x)))
+        x = self.activation(self.bn2(self.layer2(x)))
+        x = self.activation(self.bn3(self.layer3(x)))
         
         x = torch.max(x, dim=2, keepdim=True)[0]
         x = x.view(-1, 1024)
@@ -212,4 +213,5 @@ class SDFDecoder(nn.Module):
         x = F.relu(self.layer2(x))
         x = F.relu(self.layer3(x))
         x = self.layer4(x)
+        x = F.sigmoid(x)
         return x

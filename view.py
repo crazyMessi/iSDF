@@ -2,7 +2,7 @@ import numpy as np
 import polyscope as ps
 import matplotlib.pyplot as plt
 import matplotlib
-matplotlib.use('TkAgg')
+# matplotlib.use('TkAgg')
 
 def read_grid_file(filename):
     with open(filename, 'rb') as f:
