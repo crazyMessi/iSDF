@@ -2,7 +2,7 @@ import torch
 import numpy as np
 from sklearn.decomposition import PCA
 from sklearn.neighbors import KDTree
-from dtype_utils import get_numpy_dtype, get_torch_dtype, tensor_to_numpy
+from data_util.dtype_utils import get_numpy_dtype, get_torch_dtype, tensor_to_numpy
 from tools import poission_rec
 import pysdf
 import trimesh

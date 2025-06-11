@@ -88,7 +88,8 @@ def compute_winding_number_torch(query_points, points, normals, point_areas, eps
     return winding_numbers
 
 def compute_winding_number_torch_api(points, normals, query_points, epsilon=1e-8, batch_size=10000):
-    A = compute_points_area_by_knn(points)
+    A = compute_points_area_by_knn(points.cpu().numpy())
+    A = torch.from_numpy(A).float().to(points.device)
     return compute_winding_number_torch(query_points, points, normals, A, epsilon, batch_size)
 
 '''

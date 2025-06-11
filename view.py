@@ -22,8 +22,6 @@ def read_grid_file(filename):
 def view_data(labels_out,bound_low=[0,0,0],bound_high = [1,1,1]):
     ps.init()
     # define the resolution and bounds of the grid
-
-    # color = cm.get_cmap("Paired")(labels_out).astype(float)[...,:3].reshape((-1,3))
     # register the grid
     ps_grid = ps.register_volume_grid("sample grid", labels_out.shape, bound_low, bound_high)
 

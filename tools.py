@@ -2,7 +2,7 @@ import numpy as np
 from skimage import measure
 import open3d as o3d
 from scipy.spatial import cKDTree
-from dtype_utils import get_numpy_dtype
+from data_util.dtype_utils import get_numpy_dtype
 
 # 0. 计算指定分辨率的 winding number 场
 def normalize_points(points):
@@ -349,3 +349,45 @@ def get_kernel_correspond_to_connectivity(connectivity):
         kernel[:,0,:] = 1
         kernel[:,:,0] = 1
     return kernel
+
+
+def voxelize_points(points,voxel_size,volume_resolution,if_dilate=False):
+    cube_dilate = np.array(
+            [
+                [0, 0, 0],
+                [0, 0, 1],
+                [0, 1, 0],
+                [0, 0, -1],
+                [0, -1, 0],
+                [0, 1, 1],
+                [0, -1, 1],
+                [0, 1, -1],
+                [0, -1, -1],
+
+                [1, 0, 0],
+                [1, 0, 1],
+                [1, 1, 0],
+                [1, 0, -1],
+                [1, -1, 0],
+                [1, 1, 1],
+                [1, -1, 1],
+                [1, 1, -1],
+                [1, -1, -1],
+
+                [-1, 0, 0],
+                [-1, 0, 1],
+                [-1, 1, 0],
+                [-1, 0, -1],
+                [-1, -1, 0],
+                [-1, 1, 1],
+                [-1, -1, 1],
+                [-1, 1, -1],
+                [-1, -1, -1],
+            ]
+        ) / (volume_resolution * 4 - 1)
+    
+    if if_dilate:
+        points = points[np.newaxis] + cube_dilate[...,np.newaxis,:]
+        points = points.reshape(-1,3)
+        
+    

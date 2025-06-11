@@ -1,6 +1,6 @@
 import torch
 import numpy as np
-from network import SparseVoxelEncoder
+from models.lzd_models.network import SparseVoxelEncoder
 import time
 import torch.nn as nn
 import torch.nn.functional as F
