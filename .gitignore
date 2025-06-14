@@ -97,3 +97,11 @@ imgui.ini
 .env.*
 .coverage
 htmlcov/ 
+
+temp/
+models/pointnet/data/
+# models/trellis
+outputs/
+log/
+trellis
+

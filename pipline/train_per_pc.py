@@ -5,28 +5,29 @@ import os
 import numpy as np
 import argparse
 os.sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from models.trellis.models.sparse_structure_vae import SparseStructureEncoder
 import json
 from data_util.surface_sampling_dataloader import get_surface_sampling_dataloader
 from pipline.config import config # Import config
 from field import MeshSDF
 import tools
+# from models.trellis.models.sparse_structure_vae import SparseStructureEncoder
 import models.trellis.modules.sparse as sp
-import models.trellis.models.structured_latent_vae.encoder as latent_encoder
+import models.lzd_models.slat_net as latent_encoder
+import models.trellis.models.structured_latent_vae.encoder as trellis_spvae_encoder
+import models.trellis.models as trellis_models
 
 
 
-class GridEncoder(nn.Module):
-    def __init__(self):
-        super(GridEncoder, self).__init__()
-        encoder_cfg = json.load(open("/mnt/lizd/work/CG/NormalEstimation/iSDF/config/encoder_config.json")).get("model")
-        config1 = encoder_cfg.get("SparseConv3dEncoder").get("args")
-        self.ss_encoder = SparseStructureEncoder(**config1)
+# class GridEncoder(nn.Module):
+#     def __init__(self):
+#         super(GridEncoder, self).__init__()
+#         encoder_cfg = json.load(open("/mnt/lizd/work/CG/NormalEstimation/iSDF/config/encoder_config.json")).get("model")
+#         config1 = encoder_cfg.get("SparseConv3dEncoder").get("args")
+#         self.ss_encoder = SparseStructureEncoder(**config1)
 
-    def forward(self, x: torch.Tensor):
-        x = self.ss_encoder(x)
-        return x
-
+#     def forward(self, x: torch.Tensor):
+#         x = self.ss_encoder(x)
+#         return x
 
 class SLatEncoder(nn.Module):
     def __init__(self,in_dim: int):
@@ -39,22 +40,23 @@ class SLatEncoder(nn.Module):
             nn.ReLU(),
             nn.Linear(config2.get("in_channels"), config2.get("in_channels")),
         )
-        self.slat_encoder = latent_encoder.SLatEncoder(**config2)
+        # TODO: 自制一个encoder（vae的encoder会加噪）
+        # self.slat_encoder = latent_encoder.SLatEncoder(**config2)
+        
+        self.slat_encoder = trellis_spvae_encoder.SLatEncoder(**config2)
 
     def forward(self, x: sp.SparseTensor):
         feats = x.feats
         feats = self.input_transform(feats)
-        
-        x = sp.SparseTensor(feats, x.coords)
+        assert torch.isnan(feats).any() == False, "Input features contain NaN values"
+        x = x.replace(feats)
         return self.slat_encoder(x)
-
-
 
 
 class GridDecoder(nn.Module):
     def __init__(self):
         super(GridDecoder, self).__init__()
-        import models.lzd_models.slat_decoder as decoder_mesh
+        import models.lzd_models.slat_net as decoder_mesh
     
         ss_decoder_cfg = json.load(open("/mnt/lizd/work/CG/NormalEstimation/iSDF/config/decoder_config.json")).get("model").get("SlatVoxelDecoder").get("args")
         
@@ -154,8 +156,7 @@ def check_gradients():
     """检查梯度是否正常"""
     print("\n=== Gradient Check ===")
     
-    for name, model in [('pointnet', pointnet_encoder), 
-                       ('grid_encoder', grid_encoder),
+    for name, model in [
                        ('slat_encoder', slat_encoder), 
                        ('grid_decoder', grid_decoder)]:
         print(f"\n{name} gradients:")
@@ -247,18 +248,15 @@ if __name__ == "__main__":
     # ).to(device)
 
 
-    grid_encoder = GridEncoder().to(device)
     slat_encoder = SLatEncoder(in_dim=1).to(device)
     grid_decoder = GridDecoder().to(device)
 
     # Optimizer
     params_to_optimize = (
-        # list(pointnet_encoder.parameters()) +
-        list(grid_encoder.parameters()) +
         list(grid_decoder.parameters()) +
         list(slat_encoder.parameters())
     )
-    optimizer = optim.Adam(params_to_optimize, lr=cfg["learning_rate"])
+    optimizer = optim.Adam(params_to_optimize, lr=cfg["learning_rate"],eps=1e-4) # 由于是半精度，需要调大eps
 
     # Loss Function (Mean Squared Error for SDF values)
     loss_fn = nn.L1Loss() # TODO: 使用hou's Loss
@@ -271,7 +269,6 @@ if __name__ == "__main__":
         for batch_idx, (points, _, vertices, faces) in enumerate(dataloader):
             # Ensure data is on the correct device
             points = points.to(device)         # (B, N_points, 3)
-            optimizer.zero_grad()
 
             # 1. Encode points with PointNet -> f1
             voxel_coords = points.clone()
@@ -305,21 +302,33 @@ if __name__ == "__main__":
             feats = feats.unsqueeze(1)
             assert not voxel_grid_features.isnan().any()
             
+            feats[feats>0.0] = 1.0
+            feats[feats<0.0] = 0.0
+            
             sp_feats = sp.SparseTensor(feats, indices)
-            slat_feats = slat_encoder(sp_feats)
-            res = grid_decoder(slat_feats)
+            sp_feats = slat_encoder(sp_feats)
+            assert torch.isnan(sp_feats.feats).any() == False, "Input features contain NaN values"
+            sp_feats = grid_decoder(sp_feats)
+            assert torch.isnan(sp_feats.feats).any() == False, "Input features contain NaN values"
+        
             batch_size = points.shape[0]
-            dense_res = torch.zeros(batch_size,1,cfg["R"],cfg["R"],cfg["R"],device=device)
-            dense_res[indices[:,0],:,indices[:,1],indices[:,2],indices[:,3]] = res.feats
-            pred_sdf = dense_res
+            indices = sp_feats.coords
+            gt_sdf_val = gt_sdf[indices[:,0],:,indices[:,1],indices[:,2],indices[:,3]]
+            pred_val = sp_feats.feats
+            
             # TODO: 使用mask
-            loss = loss_fn(pred_sdf, gt_sdf)
-
-            loss.backward()
-            optimizer.step()
+            loss = loss_fn(pred_val, gt_sdf_val)
+            torch.autograd.set_detect_anomaly(True)
+            
+            optimizer.zero_grad()
+            # 反向传播时检测是否有异常值，定位code
+            with torch.autograd.detect_anomaly():
+                loss.backward()
+            with torch.autograd.detect_anomaly():
+                optimizer.step()
 
             if batch_idx % cfg["log_interval"] == 0:
-                acc = (pred_sdf>0.5).eq(gt_sdf>0.5).float().mean()
+                acc = (pred_val>0.5).eq(gt_sdf_val>0.5).float().mean()
                 print(f"Epoch {epoch+1}/{cfg['epochs']}, Batch {batch_idx+1}/{len(dataloader)}, Loss: {loss.item():.6f}, Acc: {acc.item():.6f}")
 
         print(f"Epoch {epoch+1}/{cfg['epochs']} completed. Last batch loss: {loss.item():.6f}")

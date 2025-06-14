@@ -2,6 +2,9 @@
 {
     "name": "Encoder",
     "model": {
+        "from_pretrain":true,
+        "pretrain_path": "checkpoints/encoder.pth",
+
         "SparseConv3dEncoder": {
             "args": {
                 "in_channels": 1,

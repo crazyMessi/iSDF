@@ -150,10 +150,6 @@ class PointNetEncoder(nn.Module):
         # 通常在训练循环中使用
         return 0
 
-
-
-
-
 def scale_tensor(
     dat, inp_scale=None, tgt_scale=None
 ):
