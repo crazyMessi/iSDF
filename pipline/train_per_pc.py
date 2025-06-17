@@ -7,12 +7,12 @@ import argparse
 os.sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 import json
 from data_util.surface_sampling_dataloader import get_surface_sampling_dataloader
-from pipline.config import config # Import config
+from pipline.config import get_config # Import config
 from field import MeshSDF
 import tools
 # from models.trellis.models.sparse_structure_vae import SparseStructureEncoder
 import models.trellis.modules.sparse as sp
-import models.lzd_models.slat_net as latent_encoder
+import models.lzd_models.slat_net as lat_net
 import models.trellis.models.structured_latent_vae.encoder as trellis_spvae_encoder
 import models.trellis.models as trellis_models
 
@@ -36,32 +36,26 @@ class SLatEncoder(nn.Module):
         config2 = encoder_cfg.get("SparseLatentEncoder").get("args")
         self.input_dim = in_dim
         self.input_transform = nn.Sequential(
-            nn.Linear(self.input_dim, config2.get("in_channels")),
-            nn.ReLU(),
-            nn.Linear(config2.get("in_channels"), config2.get("in_channels")),
+            lat_net.L_L_T(self.input_dim, config2.get("in_channels")),
+            lat_net.L_L_T(config2.get("in_channels"), config2.get("in_channels")),
         )
         # TODO: 自制一个encoder（vae的encoder会加噪）
-        # self.slat_encoder = latent_encoder.SLatEncoder(**config2)
-        
-        self.slat_encoder = trellis_spvae_encoder.SLatEncoder(**config2)
+        self.slat_encoder = lat_net.SLatEncoder(**config2)
+        # self.slat_encoder = trellis_spvae_encoder.SLatEncoder(**config2)
 
     def forward(self, x: sp.SparseTensor):
-        feats = x.feats
-        feats = self.input_transform(feats)
-        assert torch.isnan(feats).any() == False, "Input features contain NaN values"
-        x = x.replace(feats)
+        x = self.input_transform(x)
         return self.slat_encoder(x)
 
 
 class GridDecoder(nn.Module):
     def __init__(self):
         super(GridDecoder, self).__init__()
-        import models.lzd_models.slat_net as decoder_mesh
     
         ss_decoder_cfg = json.load(open("/mnt/lizd/work/CG/NormalEstimation/iSDF/config/decoder_config.json")).get("model").get("SlatVoxelDecoder").get("args")
         
-        self.ss_decoder = decoder_mesh.SLatVoxelDecoder(**ss_decoder_cfg)
-        self.activation = nn.Sigmoid()
+        self.ss_decoder = lat_net.SLatVoxelDecoder(**ss_decoder_cfg)
+        self.activation = nn.Tanh()
 
         
     def forward(self, x):
@@ -144,13 +138,24 @@ def op2wnf(points, pred_normals, r, device):
     
     for i in range(batch_size):
         wnf = cal_wnf.compute_winding_number_torch_api(points[i], pred_normals[i],query_points,epsilon=1e-8,batch_size=10000)
-        mask = tools.create_mask_by_k(query_points.cpu().numpy(),points[i].cpu().numpy(),k=10)
+        mask = tools.create_mask_by_k(query_points.cpu().numpy(),points[i].cpu().numpy(),k=30)
         mask = torch.from_numpy(mask).to(device)
         mask = mask.reshape(grid_shape)
         wnf = wnf.reshape(grid_shape)
         masks[i] = mask
         voxel_grid[i] = wnf
     return voxel_grid,masks # Shape (B, r, r, r)
+
+# 自定义loss
+class CustomLoss(nn.Module):
+    def __init__(self):
+        super(CustomLoss, self).__init__()
+        
+    def forward(self, pred, target):
+        loss = 1 - torch.abs(torch.mean(pred*target))
+        return loss * 1000
+
+
 
 def check_gradients():
     """检查梯度是否正常"""
@@ -180,6 +185,13 @@ def check_gradients():
         
         total_norm = total_norm ** (1. / 2)
         print(f"  Total gradient norm: {total_norm:.4f}")
+
+def get_total_grad_norm(model):
+    total_norm = 0
+    for param in model.parameters():
+        if param.grad is not None:
+            total_norm += param.grad.data.norm(2).item() ** 2
+    return total_norm ** (1. / 2)
 
 def check_model_params(model, model_name="Model"):
     """检查模型参数中的非法值"""
@@ -217,10 +229,12 @@ if __name__ == "__main__":
     # Parse command-line arguments
     parser = argparse.ArgumentParser(description='Train a neural network for SDF estimation')
     parser.add_argument('--gpu', type=int, default=None, help='GPU ID to use (e.g., 0, 1, etc.)')
+    parser.add_argument('--dataset_name', type=str, default=None, help='Dataset name')
+    
     args = parser.parse_args()
 
     # Load configuration
-    cfg = config
+    cfg = get_config(dataset_name=args.dataset_name)
     
     # Set device based on command-line argument
     if args.gpu is not None:
@@ -238,7 +252,8 @@ if __name__ == "__main__":
         save_path=cfg["save_path"],
         use_torch=cfg["use_torch_dataloader"],
         device=device,
-        normalize=True
+        normalize=True,
+        shuffle=False
     )
 
     # # Initialize Models
@@ -259,14 +274,13 @@ if __name__ == "__main__":
     optimizer = optim.Adam(params_to_optimize, lr=cfg["learning_rate"],eps=1e-4) # 由于是半精度，需要调大eps
 
     # Loss Function (Mean Squared Error for SDF values)
-    loss_fn = nn.L1Loss() # TODO: 使用hou's Loss
-
+    loss_fn = CustomLoss()
     # Training Loop
     
     pointcloud_voxel_resolution = cfg["r"]
     
     for epoch in range(cfg["epochs"]):
-        for batch_idx, (points, _, vertices, faces) in enumerate(dataloader):
+        for batch_idx, (points, gt_normals, vertices, faces) in enumerate(dataloader):
             # Ensure data is on the correct device
             points = points.to(device)         # (B, N_points, 3)
 
@@ -289,7 +303,7 @@ if __name__ == "__main__":
             gt_sdf = compute_gt_sdf_grid(vertices, faces, cfg["R"], device) # (B, R, R, R) 
             gt_sdf = gt_sdf.unsqueeze(1)
             gt_sdf[gt_sdf>0.0] = 1
-            gt_sdf[gt_sdf<0.0] = 0
+            gt_sdf[gt_sdf<0.0] = -1
             
 
             # 3. Estimate normals using PCA -> pred_normal
@@ -297,39 +311,65 @@ if __name__ == "__main__":
 
             # 4. Create voxel grid (r x r x r) from predicted normals
             voxel_grid_features,masks = op2wnf(points, pred_normals, cfg["r"], device) # (B, r, r, r)
-            indices = torch.nonzero(masks).int()
+            gt_wnf,_ = op2wnf(points, gt_normals, cfg["r"], device) # (B, r, r, r)
+            indices = torch.nonzero(masks).int()            
+            gt_wnf_val = gt_wnf[indices[:,0],None,indices[:,1],indices[:,2],indices[:,3]]
+            gt_wnf_val = torch.tanh(gt_wnf_val) 
             feats = voxel_grid_features[indices[:,0],indices[:,1],indices[:,2],indices[:,3]]
             feats = feats.unsqueeze(1)
+            feats = torch.tanh(feats)
+            feats_acc = (feats>0.0).eq(gt_wnf_val>0.0).float().mean()
+            
             assert not voxel_grid_features.isnan().any()
             
             feats[feats>0.0] = 1.0
-            feats[feats<0.0] = 0.0
+            feats[feats<0.0] = -1.0
+            
+            gt_sdf_val = gt_sdf[indices[:,0],:,indices[:,1],indices[:,2],indices[:,3]]
             
             sp_feats = sp.SparseTensor(feats, indices)
             sp_feats = slat_encoder(sp_feats)
-            assert torch.isnan(sp_feats.feats).any() == False, "Input features contain NaN values"
             sp_feats = grid_decoder(sp_feats)
-            assert torch.isnan(sp_feats.feats).any() == False, "Input features contain NaN values"
-        
             batch_size = points.shape[0]
             indices = sp_feats.coords
             gt_sdf_val = gt_sdf[indices[:,0],:,indices[:,1],indices[:,2],indices[:,3]]
             pred_val = sp_feats.feats
             
-            # TODO: 使用mask
-            loss = loss_fn(pred_val, gt_sdf_val)
-            torch.autograd.set_detect_anomaly(True)
-            
+            loss = loss_fn(pred_val, gt_wnf_val)
             optimizer.zero_grad()
-            # 反向传播时检测是否有异常值，定位code
-            with torch.autograd.detect_anomaly():
-                loss.backward()
-            with torch.autograd.detect_anomaly():
-                optimizer.step()
+            loss.backward()
+            optimizer.step()
+            total_grad_norm_encoder = get_total_grad_norm(slat_encoder)
+            total_grad_norm_decoder = get_total_grad_norm(grid_decoder)
+            print(f"Epoch {epoch+1}/{cfg['epochs']}, Batch {batch_idx+1}/{len(dataloader)}, Loss: {loss.item():.6f}, encoder_Total_grad_norm: {total_grad_norm_encoder:.6f}, decoder_Total_grad_norm: {total_grad_norm_decoder:.6f}")
 
             if batch_idx % cfg["log_interval"] == 0:
-                acc = (pred_val>0.5).eq(gt_sdf_val>0.5).float().mean()
-                print(f"Epoch {epoch+1}/{cfg['epochs']}, Batch {batch_idx+1}/{len(dataloader)}, Loss: {loss.item():.6f}, Acc: {acc.item():.6f}")
+                acc = (pred_val>0.0).eq(gt_wnf_val>0.0).float().mean()
+                loss_gt_wnf = loss_fn(gt_wnf_val,gt_sdf_val)
+                acc_wnf = (gt_sdf_val>0.0).eq(gt_wnf_val>0.0).float().mean()
+                
+                print(f"Epoch {epoch+1}/{cfg['epochs']}, Batch {batch_idx+1}/{len(dataloader)}, Loss: {loss.item():.6f}, Acc: {acc.item():.6f}, Acc_wnf: {acc_wnf.item():.6f}, Loss_gt_wnf: {loss_gt_wnf.item():.6f}, Feats_acc: {feats_acc.item():.6f}")
+                ifview = False
+                if True:
+                    os.makedirs("test_results",exist_ok=True)
+                    os.makedirs("test_results/mesh_{}".format(batch_idx),exist_ok=True)
+                    tools.extract_surface_from_scalar_field(gt_sdf[0].squeeze().cpu().numpy(),level=0,resolution=cfg["r"],save_path="test_results/mesh_{}/gt_sdf.ply".format(batch_idx),mask=masks[0].cpu().numpy())
+                    pred_sdf = torch.zeros_like(gt_sdf)
+                    pred_sdf[indices[:,0],:,indices[:,1],indices[:,2],indices[:,3]] = pred_val
+                    tools.extract_surface_from_scalar_field(pred_sdf[0].squeeze().cpu().detach().numpy(),level=0,resolution=cfg["r"],save_path="test_results/mesh_{}/pred_sdf.ply".format(batch_idx),mask=masks[0].cpu().numpy())
+                    tools.extract_surface_from_scalar_field(gt_wnf[0].squeeze().cpu().numpy(),level=0,resolution=cfg["r"],save_path="test_results/mesh_{}/gt_wnf.ply".format(batch_idx))
+                    # 保存vertices和faces为ply
+                    import open3d as o3d
+                    o3d.io.write_triangle_mesh("test_results/mesh_{}/gt_mesh.ply".format(batch_idx),o3d.geometry.TriangleMesh(o3d.utility.Vector3dVector(vertices[0].cpu().numpy()),o3d.utility.Vector3iVector(faces[0].cpu().numpy())))
+                    # 保存field
+                    np.save("test_results/mesh_{}/gt_sdf.npy".format(batch_idx),gt_sdf[0].cpu().numpy())
+                    np.save("test_results/mesh_{}/pred_sdf.npy".format(batch_idx),pred_sdf[0].cpu().detach().numpy())
+                    np.save("test_results/mesh_{}/gt_wnf.npy".format(batch_idx),gt_wnf[0].cpu().numpy())
+                    
+                    # import view
+                    # view.view_data(gt_sdf[0].cpu().numpy())
+                    # view.view_data(pred_sdf[0].cpu().numpy())
+                    # view.view_data(gt_wnf[0].cpu().numpy())
 
         print(f"Epoch {epoch+1}/{cfg['epochs']} completed. Last batch loss: {loss.item():.6f}")
 

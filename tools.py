@@ -243,7 +243,9 @@ def poission_rec(input_file_name,output_file_name,inv=True,clean_k=30,btype=3,de
     return
 
 
-def extract_surface_from_scalar_field(scalar_field, level, resolution,bbox=np.array([[-1,1],[-1,1],[-1,1]]),mask=None):
+def extract_surface_from_scalar_field(scalar_field, level, 
+                                      resolution,bbox=np.array([[-1,1],[-1,1],[-1,1]]),mask=None,
+                                      save_path=None):
     """
     从3D标量场中提取等值面
     参数:
@@ -258,6 +260,12 @@ def extract_surface_from_scalar_field(scalar_field, level, resolution,bbox=np.ar
     spacing = np.array([bbox[0,1]-bbox[0,0],bbox[1,1]-bbox[1,0],bbox[2,1]-bbox[2,0]])/(resolution-1)
     
     try:
+        # 对mask进行腐蚀
+        if mask is not None:
+            import skimage.morphology as morphology
+            kernel = morphology.ball(1)
+            mask = morphology.binary_erosion(mask,kernel)
+
         # 使用marching cubes提取等值面
         verts, faces, normals, values = measure.marching_cubes(
             scalar_field,
@@ -267,6 +275,8 @@ def extract_surface_from_scalar_field(scalar_field, level, resolution,bbox=np.ar
             mask=mask
         )
         verts = verts + [bbox[0,0],bbox[1,0],bbox[2,0]]
+        if save_path is not None:
+            o3d.io.write_triangle_mesh(save_path,o3d.geometry.TriangleMesh(o3d.utility.Vector3dVector(verts),o3d.utility.Vector3iVector(faces)))
         return verts, faces
         
     except Exception as e:

@@ -8,7 +8,25 @@ from ..trellis.modules import sparse as sp
 from ..trellis.models.structured_latent_vae.base import SparseTransformerBase
 
 
+# 线性+layer norm+tanh lizd
+class L_L_T(nn.Module):
+    def __init__(self, in_features, out_features, bias=True):
+        super(L_L_T, self).__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        self.bias = bias
+        self.linear = nn.Linear(in_features, out_features, bias)
+        self.norm = nn.LayerNorm(out_features)
+        self.activate = nn.Tanh()
 
+    def forward(self, input: sp.SparseTensor) -> sp.SparseTensor:
+        return input.replace(self.activate(self.norm(self.linear(input.feats))))
+    
+    def initialize_weights(self) -> None:
+        nn.init.xavier_uniform_(self.linear.weight)
+        nn.init.zeros_(self.linear.bias)
+
+# 线性+layer norm+tanh lizd
 class SLatEncoder(SparseTransformerBase):
     def __init__(
         self,
@@ -26,6 +44,7 @@ class SLatEncoder(SparseTransformerBase):
         use_fp16: bool = False,
         use_checkpoint: bool = False,
         qk_rms_norm: bool = False,
+        model2latent: List[int] = None,
     ):
         super().__init__(
             in_channels=in_channels,
@@ -42,10 +61,16 @@ class SLatEncoder(SparseTransformerBase):
             qk_rms_norm=qk_rms_norm,
         )
         self.resolution = resolution
-        self.out_layer = sp.SparseLinear(model_channels, 2 * latent_channels)
-        self.activate = nn.Sigmoid() # TODO: 改成normalization
         
-
+        layers = []
+        for i in range(len(model2latent)-1):
+            layers.append(L_L_T(model2latent[i], model2latent[i+1]))
+        layers.append(L_L_T(model2latent[-1], latent_channels * 2))
+            
+        
+        self.model2latent_layers = nn.Sequential(*layers)
+        self.out_layer = L_L_T(latent_channels * 2, latent_channels * 2) # 输出mean和logvar
+        
         self.initialize_weights()
         if use_fp16:
             self.convert_to_fp16()
@@ -55,20 +80,17 @@ class SLatEncoder(SparseTransformerBase):
         # Zero-out output layers:
         # nn.init.constant_(self.out_layer.weight, 0)
         # nn.init.constant_(self.out_layer.bias, 0)
-        nn.init.xavier_uniform_(self.out_layer.weight)
-        nn.init.zeros_(self.out_layer.bias)
+        for layer in self.model2latent_layers:
+            if isinstance(layer, L_L_T):
+                layer.initialize_weights()
+        self.out_layer.initialize_weights()
 
     def forward(self, x: sp.SparseTensor, sample_posterior=True, return_raw=False):
         h = super().forward(x)
         h = h.type(x.dtype)
         h = h.replace(F.layer_norm(h.feats, h.feats.shape[-1:]))
+        h = self.model2latent_layers(h)
         h = self.out_layer(h)
-        feats = h.feats
-        assert torch.isnan(feats).any() == False, "Input features contain NaN values"
-        feats = self.activate(feats)
-        assert torch.isnan(feats).any() == False, "Input features contain NaN values"
-        h = h.replace(feats)
-        
         
         # TODO: 检查是否有用 Sample from the posterior distribution
         mean, logvar = h.feats.chunk(2, dim=-1)
@@ -107,6 +129,7 @@ class SLatVoxelDecoder(SparseTransformerBase):
         use_checkpoint: bool = False,
         qk_rms_norm: bool = False,
         representation_config: dict = None,
+        model2rep: List[int] = None,
     ):
         super().__init__(
             in_channels=latent_channels,
@@ -124,7 +147,15 @@ class SLatVoxelDecoder(SparseTransformerBase):
         )
         self.resolution = resolution
         self.rep_config = representation_config
-        self.out_layer = sp.SparseLinear(model_channels, out_channels)
+        
+        # self.out_layer = sp.SparseLinear(model_channels, out_channels)
+        
+        layers = []
+        for i in range(len(model2rep)-2):
+            layers.append(L_L_T(model2rep[i], model2rep[i+1]))
+        self.model2rep_layers = nn.Sequential(*layers)
+        assert model2rep[-1] == out_channels
+        self.out_layer = nn.Linear(model2rep[-2], model2rep[-1])
 
         self.initialize_weights()
         if use_fp16:
@@ -133,18 +164,19 @@ class SLatVoxelDecoder(SparseTransformerBase):
     def forward(self, x: sp.SparseTensor) -> sp.SparseTensor:
         h = super().forward(x)
         h = h.type(x.dtype)
-        h = self.out_layer(h)
-        assert torch.isnan(h.feats).any() == False, "Input features contain NaN values"
+        h = self.model2rep_layers(h)
+        # TODO: 检查是否有用
+        feats = F.normalize(h.feats)
+        h = h.replace(self.out_layer(feats))
         return h
 
     def initialize_weights(self) -> None:
         super().initialize_weights()
-        # Zero-out output layers    
-        # nn.init.constant_(self.out_layer.weight, 0)
-        # nn.init.constant_(self.out_layer.bias, 0
-        # 随机初始化
         nn.init.xavier_uniform_(self.out_layer.weight)
         nn.init.zeros_(self.out_layer.bias)
+        for layer in self.model2rep_layers:
+            if isinstance(layer, L_L_T):
+                layer.initialize_weights()
     
     def convert_to_fp16(self) -> None:
         super().convert_to_fp16()

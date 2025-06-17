@@ -21,6 +21,7 @@
                 "in_channels": 1024,
                 "model_channels": 768,
                 "latent_channels": 8,
+                "model2latent": [768,768,512,256,128,64,8],
                 "num_blocks": 12,
                 "num_heads": 12,
                 "mlp_ratio": 4,
