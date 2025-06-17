@@ -1,7 +1,7 @@
 import torch
 import numpy as np
 import open3d as o3d
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, Subset
 import os
 import json
 from tqdm import tqdm
@@ -211,7 +211,8 @@ class SurfaceSamplingDatasetTorch(SurfaceSamplingDataset):
 
 def get_surface_sampling_dataloader(data_path, num_samples=2048, batch_size=8, 
                                   shuffle=True, num_workers=4, normalize=True,
-                                  save_path=None, use_torch=True, device='cpu'):
+                                  save_path=None, use_torch=True, device='cpu',
+                                  val_split=0.0):
     """
     创建表面采样数据加载器
     
@@ -225,9 +226,13 @@ def get_surface_sampling_dataloader(data_path, num_samples=2048, batch_size=8,
         save_path: 预处理数据保存路径
         use_torch: 是否返回PyTorch张量
         device: 设备类型
+        val_split: 验证集比例 (0.0-1.0)，如果为0则不分割数据集
         
     Returns:
-        DataLoader对象
+        如果 val_split > 0:
+            (train_dataloader, val_dataloader)
+        否则:
+            dataloader
     """
     if use_torch:
         dataset = SurfaceSamplingDatasetTorch(
@@ -238,7 +243,6 @@ def get_surface_sampling_dataloader(data_path, num_samples=2048, batch_size=8,
             device=device
         )
     else:
-        
         dataset = SurfaceSamplingDataset(
             data_path=data_path,
             num_samples=num_samples,
@@ -246,15 +250,53 @@ def get_surface_sampling_dataloader(data_path, num_samples=2048, batch_size=8,
             save_path=save_path
         )
     
-    dataloader = DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=shuffle,
-        num_workers=num_workers if not use_torch else 0,  # PyTorch张量版本不使用多进程
-        collate_fn=SurfaceSamplingDataset.my_collate
-    )
-    
-    return dataloader
+    if val_split > 0:
+        # 计算训练集和验证集的大小
+        dataset_size = len(dataset)
+        val_size = int(dataset_size * val_split)
+        train_size = dataset_size - val_size
+        
+        # 创建训练集和验证集的索引
+        indices = list(range(dataset_size))
+        if shuffle:
+            np.random.shuffle(indices)
+        
+        train_indices = indices[:train_size]
+        val_indices = indices[train_size:]
+        
+        # 创建训练集和验证集的子集
+        train_dataset = Subset(dataset, train_indices)
+        val_dataset = Subset(dataset, val_indices)
+        
+        # 创建数据加载器
+        train_dataloader = DataLoader(
+            train_dataset,
+            batch_size=batch_size,
+            shuffle=shuffle,
+            num_workers=num_workers if not use_torch else 0,
+            collate_fn=SurfaceSamplingDataset.my_collate
+        )
+        
+        val_dataloader = DataLoader(
+            val_dataset,
+            batch_size=batch_size,
+            shuffle=False,  # 验证集不需要打乱
+            num_workers=num_workers if not use_torch else 0,
+            collate_fn=SurfaceSamplingDataset.my_collate
+        )
+        
+        return train_dataloader, val_dataloader
+    else:
+        # 不分割数据集
+        dataloader = DataLoader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=shuffle,
+            num_workers=num_workers if not use_torch else 0,
+            collate_fn=SurfaceSamplingDataset.my_collate
+        )
+        
+        return dataloader
 
 
 # 示例用法

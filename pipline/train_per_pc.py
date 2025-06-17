@@ -138,7 +138,7 @@ def op2wnf(points, pred_normals, r, device):
     
     for i in range(batch_size):
         wnf = cal_wnf.compute_winding_number_torch_api(points[i], pred_normals[i],query_points,epsilon=1e-8,batch_size=10000)
-        mask = tools.create_mask_by_k(query_points.cpu().numpy(),points[i].cpu().numpy(),k=30)
+        mask = tools.create_mask_by_k(query_points.cpu().numpy(),points[i].cpu().numpy(),k=60)
         mask = torch.from_numpy(mask).to(device)
         mask = mask.reshape(grid_shape)
         wnf = wnf.reshape(grid_shape)
@@ -225,11 +225,93 @@ def check_model_params(model, model_name="Model"):
     
     return has_nan, has_inf
 
+def evaluate_model(model_encoder, model_decoder, dataloader, device, cfg):
+    """
+    Evaluate model on validation/test set
+    """
+    model_encoder.eval()
+    model_decoder.eval()
+    
+    total_loss = 0
+    total_acc = 0
+    total_acc_wnf = 0
+    total_feats_acc = 0
+    num_batches = 0
+    
+    with torch.no_grad():
+        for batch_idx, (points, gt_normals, vertices, faces) in enumerate(dataloader):
+            points = points.to(device)
+            
+            # Process points
+            voxel_coords = points.clone()
+            voxel_coords = (voxel_coords+1.0)/2.0
+            voxel_coords = (voxel_coords*cfg["r"]).long()
+            
+            B, N, _ = voxel_coords.shape
+            batch_indices = torch.arange(B, device=voxel_coords.device).repeat_interleave(N).unsqueeze(-1)
+            voxel_coords = torch.cat([batch_indices, voxel_coords.reshape(-1, 3)], dim=-1).int()
+            
+            # Compute GT SDF grid
+            gt_sdf = compute_gt_sdf_grid(vertices, faces, cfg["R"], device)
+            gt_sdf = gt_sdf.unsqueeze(1)
+            gt_sdf[gt_sdf>0.0] = 1
+            gt_sdf[gt_sdf<0.0] = -1
+            
+            # Estimate normals
+            pred_normals = estimate_normals_pca(points, k=cfg["pca_knn"])
+            
+            # Create voxel grid
+            voxel_grid_features, masks = op2wnf(points, pred_normals, cfg["r"], device)
+            gt_wnf, _ = op2wnf(points, gt_normals, cfg["r"], device)
+            
+            indices = torch.nonzero(masks).int()
+            gt_wnf_val = gt_wnf[indices[:,0],None,indices[:,1],indices[:,2],indices[:,3]]
+            gt_wnf_val = torch.tanh(gt_wnf_val)
+            
+            feats = voxel_grid_features[indices[:,0],indices[:,1],indices[:,2],indices[:,3]]
+            feats = feats.unsqueeze(1)
+            feats = torch.tanh(feats)
+            feats_acc = (feats>0.0).eq(gt_wnf_val>0.0).float().mean()
+            
+            feats[feats>0.0] = 1.0
+            feats[feats<0.0] = -1.0
+            
+            gt_sdf_val = gt_sdf[indices[:,0],:,indices[:,1],indices[:,2],indices[:,3]]
+            
+            # Forward pass
+            sp_feats = sp.SparseTensor(gt_wnf_val, indices)
+            sp_feats = model_encoder(sp_feats)
+            sp_feats = model_decoder(sp_feats)
+            
+            indices = sp_feats.coords
+            gt_sdf_val = gt_sdf[indices[:,0],:,indices[:,1],indices[:,2],indices[:,3]]
+            pred_val = sp_feats.feats
+            
+            # Compute metrics
+            loss = loss_fn(pred_val, gt_wnf_val)
+            acc = (pred_val>0.0).eq(gt_wnf_val>0.0).float().mean()
+            acc_wnf = (gt_sdf_val>0.0).eq(gt_wnf_val>0.0).float().mean()
+            
+            total_loss += loss.item()
+            total_acc += acc.item()
+            total_acc_wnf += acc_wnf.item()
+            total_feats_acc += feats_acc.item()
+            num_batches += 1
+    
+    # Compute averages
+    avg_loss = total_loss / num_batches
+    avg_acc = total_acc / num_batches
+    avg_acc_wnf = total_acc_wnf / num_batches
+    avg_feats_acc = total_feats_acc / num_batches
+    
+    return avg_loss, avg_acc, avg_acc_wnf, avg_feats_acc
+
 if __name__ == "__main__":
     # Parse command-line arguments
     parser = argparse.ArgumentParser(description='Train a neural network for SDF estimation')
     parser.add_argument('--gpu', type=int, default=None, help='GPU ID to use (e.g., 0, 1, etc.)')
     parser.add_argument('--dataset_name', type=str, default=None, help='Dataset name')
+    parser.add_argument('--val_split', type=float, default=0.1, help='Validation set split ratio')
     
     args = parser.parse_args()
 
@@ -244,8 +326,8 @@ if __name__ == "__main__":
     
     print(f"Using device: {device}")
 
-    # Initialize Dataloader
-    dataloader = get_surface_sampling_dataloader(
+    # Initialize Dataloaders with validation split
+    train_dataloader, val_dataloader = get_surface_sampling_dataloader(
         data_path=cfg["data_path"],
         num_samples=cfg["num_samples"],
         batch_size=cfg["batch_size"],
@@ -253,16 +335,14 @@ if __name__ == "__main__":
         use_torch=cfg["use_torch_dataloader"],
         device=device,
         normalize=True,
-        shuffle=False
+        shuffle=True,
+        val_split=args.val_split
     )
+    
+    print(f"Training set size: {len(train_dataloader.dataset)}")
+    print(f"Validation set size: {len(val_dataloader.dataset)}")
 
-    # # Initialize Models
-    # pointnet_encoder = LocalPoolPointnet(
-    #     in_channels=cfg["pointnet_input_channels"],
-    #     out_channels=cfg["pointnet_output_dim"]
-    # ).to(device)
-
-
+    # Initialize Models
     slat_encoder = SLatEncoder(in_dim=1).to(device)
     grid_decoder = GridDecoder().to(device)
 
@@ -271,16 +351,22 @@ if __name__ == "__main__":
         list(grid_decoder.parameters()) +
         list(slat_encoder.parameters())
     )
-    optimizer = optim.Adam(params_to_optimize, lr=cfg["learning_rate"],eps=1e-4) # 由于是半精度，需要调大eps
+    optimizer = optim.Adam(params_to_optimize, lr=cfg["learning_rate"], eps=1e-4)
 
-    # Loss Function (Mean Squared Error for SDF values)
+    # Loss Function
     loss_fn = CustomLoss()
-    # Training Loop
     
+    # Training Loop
     pointcloud_voxel_resolution = cfg["r"]
+    best_val_loss = float('inf')
+    best_val_acc = 0.0
     
     for epoch in range(cfg["epochs"]):
-        for batch_idx, (points, gt_normals, vertices, faces) in enumerate(dataloader):
+        # Training phase
+        slat_encoder.train()
+        grid_decoder.train()
+        
+        for batch_idx, (points, gt_normals, vertices, faces) in enumerate(train_dataloader):
             # Ensure data is on the correct device
             points = points.to(device)         # (B, N_points, 3)
 
@@ -341,14 +427,14 @@ if __name__ == "__main__":
             optimizer.step()
             total_grad_norm_encoder = get_total_grad_norm(slat_encoder)
             total_grad_norm_decoder = get_total_grad_norm(grid_decoder)
-            print(f"Epoch {epoch+1}/{cfg['epochs']}, Batch {batch_idx+1}/{len(dataloader)}, Loss: {loss.item():.6f}, encoder_Total_grad_norm: {total_grad_norm_encoder:.6f}, decoder_Total_grad_norm: {total_grad_norm_decoder:.6f}")
+            print(f"Epoch {epoch+1}/{cfg['epochs']}, Batch {batch_idx+1}/{len(train_dataloader)}, Loss: {loss.item():.6f}, encoder_Total_grad_norm: {total_grad_norm_encoder:.6f}, decoder_Total_grad_norm: {total_grad_norm_decoder:.6f}")
 
             if batch_idx % cfg["log_interval"] == 0:
                 acc = (pred_val>0.0).eq(gt_wnf_val>0.0).float().mean()
                 loss_gt_wnf = loss_fn(gt_wnf_val,gt_sdf_val)
                 acc_wnf = (gt_sdf_val>0.0).eq(gt_wnf_val>0.0).float().mean()
                 
-                print(f"Epoch {epoch+1}/{cfg['epochs']}, Batch {batch_idx+1}/{len(dataloader)}, Loss: {loss.item():.6f}, Acc: {acc.item():.6f}, Acc_wnf: {acc_wnf.item():.6f}, Loss_gt_wnf: {loss_gt_wnf.item():.6f}, Feats_acc: {feats_acc.item():.6f}")
+                print(f"Epoch {epoch+1}/{cfg['epochs']}, Batch {batch_idx+1}/{len(train_dataloader)}, Loss: {loss.item():.6f}, Acc: {acc.item():.6f}, Acc_wnf: {acc_wnf.item():.6f}, Loss_gt_wnf: {loss_gt_wnf.item():.6f}, Feats_acc: {feats_acc.item():.6f}")
                 ifview = False
                 if True:
                     os.makedirs("test_results",exist_ok=True)
@@ -357,7 +443,7 @@ if __name__ == "__main__":
                     pred_sdf = torch.zeros_like(gt_sdf)
                     pred_sdf[indices[:,0],:,indices[:,1],indices[:,2],indices[:,3]] = pred_val
                     tools.extract_surface_from_scalar_field(pred_sdf[0].squeeze().cpu().detach().numpy(),level=0,resolution=cfg["r"],save_path="test_results/mesh_{}/pred_sdf.ply".format(batch_idx),mask=masks[0].cpu().numpy())
-                    tools.extract_surface_from_scalar_field(gt_wnf[0].squeeze().cpu().numpy(),level=0,resolution=cfg["r"],save_path="test_results/mesh_{}/gt_wnf.ply".format(batch_idx))
+                    tools.extract_surface_from_scalar_field(gt_wnf[0].squeeze().cpu().numpy(),level=0,resolution=cfg["r"],save_path="test_results/mesh_{}/gt_wnf.ply".format(batch_idx),mask=masks[0].cpu().numpy())
                     # 保存vertices和faces为ply
                     import open3d as o3d
                     o3d.io.write_triangle_mesh("test_results/mesh_{}/gt_mesh.ply".format(batch_idx),o3d.geometry.TriangleMesh(o3d.utility.Vector3dVector(vertices[0].cpu().numpy()),o3d.utility.Vector3iVector(faces[0].cpu().numpy())))
@@ -371,7 +457,39 @@ if __name__ == "__main__":
                     # view.view_data(pred_sdf[0].cpu().numpy())
                     # view.view_data(gt_wnf[0].cpu().numpy())
 
-        print(f"Epoch {epoch+1}/{cfg['epochs']} completed. Last batch loss: {loss.item():.6f}")
+        # Validation phase
+        val_loss, val_acc, val_acc_wnf, val_feats_acc = evaluate_model(
+            slat_encoder, grid_decoder, val_dataloader, device, cfg
+        )
+        
+        print(f"\nValidation Results - Epoch {epoch+1}:")
+        print(f"Loss: {val_loss:.6f}, Acc: {val_acc:.6f}")
+        print(f"Acc_wnf: {val_acc_wnf:.6f}, Feats_acc: {val_feats_acc:.6f}")
+        
+        # Regular checkpoint saving
+        os.makedirs("temp/checkpoints",exist_ok=True)
+        
+        
+        # Save best model
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': slat_encoder.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'val_loss': val_loss,
+                'val_acc': val_acc
+            }, "temp/checkpoints/best_model.pth")
+            print(f"Saved new best model with validation loss: {val_loss:.6f}")
+        
+        if epoch % cfg["save_checkpoint_interval"] == 0:
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': slat_encoder.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'val_loss': val_loss,
+                'val_acc': val_acc
+            }, f"temp/checkpoints/model_{epoch}.pth")
 
     print("Training finished.")
 
