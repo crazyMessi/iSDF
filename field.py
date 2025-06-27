@@ -190,12 +190,16 @@ class SDFField:
         # Convert to numpy for KDTree
         points_np = tensor_to_numpy(points)
         normals_np = tensor_to_numpy(normals)
+        if isinstance(voxel_grid,torch.Tensor):
+            voxel_grid_np = tensor_to_numpy(voxel_grid)
+        else:
+            voxel_grid_np = voxel_grid
         
         # Build KD-tree
         tree = KDTree(points_np)
         
         # Query KD-tree for nearest neighbors
-        distances, indices = tree.query(voxel_grid, k=1)
+        distances, indices = tree.query(voxel_grid_np, k=1)
         distances = distances.flatten()
         distances = np.sqrt(distances)
         

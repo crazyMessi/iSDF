@@ -5,7 +5,7 @@
             "args":{
                 "resolution": 64,
                 "model_channels": 512,
-                "model2rep": [512,256,128,64,32,16,8,1],
+                "model2rep": [512,64,1],
                 "latent_channels": 8,
                 "out_channels": 1,
                 "num_blocks": 8,

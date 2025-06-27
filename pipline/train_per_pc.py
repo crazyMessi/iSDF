@@ -8,7 +8,7 @@ os.sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '.
 import json
 from data_util.surface_sampling_dataloader import get_surface_sampling_dataloader
 from pipline.config import get_config # Import config
-from field import MeshSDF
+from field import MeshSDF,SDFField
 import tools
 # from models.trellis.models.sparse_structure_vae import SparseStructureEncoder
 import models.trellis.modules.sparse as sp
@@ -225,85 +225,91 @@ def check_model_params(model, model_name="Model"):
     
     return has_nan, has_inf
 
-def evaluate_model(model_encoder, model_decoder, dataloader, device, cfg):
+def evaluate_model(model_encoder, model_decoder, dataloader, device, cfg, loss_fn):
     """
-    Evaluate model on validation/test set
+    Evaluates the model on the validation/test set using **exactly** the same
+    data-preparation pipeline as the training loop so that no distribution
+    shift is introduced between training and evaluation.
     """
     model_encoder.eval()
     model_decoder.eval()
-    
-    total_loss = 0
-    total_acc = 0
-    total_acc_wnf = 0
-    total_feats_acc = 0
+
+    total_loss = 0.0
+    total_acc = 0.0
+    total_acc_wnf = 0.0
+    total_feats_acc = 0.0
     num_batches = 0
-    
+
     with torch.no_grad():
         for batch_idx, (points, gt_normals, vertices, faces) in enumerate(dataloader):
-            points = points.to(device)
-            
-            # Process points
-            voxel_coords = points.clone()
-            voxel_coords = (voxel_coords+1.0)/2.0
-            voxel_coords = (voxel_coords*cfg["r"]).long()
-            
-            B, N, _ = voxel_coords.shape
-            batch_indices = torch.arange(B, device=voxel_coords.device).repeat_interleave(N).unsqueeze(-1)
-            voxel_coords = torch.cat([batch_indices, voxel_coords.reshape(-1, 3)], dim=-1).int()
-            
-            # Compute GT SDF grid
-            gt_sdf = compute_gt_sdf_grid(vertices, faces, cfg["R"], device)
-            gt_sdf = gt_sdf.unsqueeze(1)
-            gt_sdf[gt_sdf>0.0] = 1
-            gt_sdf[gt_sdf<0.0] = -1
-            
-            # Estimate normals
+            points = points.to(device)  # (B, N_pts, 3)
+            B = points.size(0)
+
+            # 1. GT SDF grid
+            gt_sdf = compute_gt_sdf_grid(vertices, faces, cfg["R"], device)  # (B, R, R, R)
+            gt_sdf = gt_sdf.unsqueeze(1)                                       # (B, 1, R, R, R)
+            gt_sdf[gt_sdf > 0.0] = 1
+            gt_sdf[gt_sdf < 0.0] = -1
+
+            # 2. Estimate normals with PCA
             pred_normals = estimate_normals_pca(points, k=cfg["pca_knn"])
-            
-            # Create voxel grid
-            voxel_grid_features, masks = op2wnf(points, pred_normals, cfg["r"], device)
+
+            # 3. Create voxel grid + mask from predicted normals
+            voxel_grid_features, masks = op2wnf(points, pred_normals, cfg["r"], device)  # (B, r, r, r)
             gt_wnf, _ = op2wnf(points, gt_normals, cfg["r"], device)
-            
-            indices = torch.nonzero(masks).int()
-            gt_wnf_val = gt_wnf[indices[:,0],None,indices[:,1],indices[:,2],indices[:,3]]
-            gt_wnf_val = torch.tanh(gt_wnf_val)
-            
-            feats = voxel_grid_features[indices[:,0],indices[:,1],indices[:,2],indices[:,3]]
-            feats = feats.unsqueeze(1)
+
+            # 4. UDF on the masked voxels (keeps consistency with training)
+            sdf_field = SDFField(64)
+            udf = torch.zeros([B, cfg["r"], cfg["r"], cfg["r"]], device=device)
+            for i in range(B):
+                qp, ssq = tools.create_uniform_grid(cfg["r"], bbox=np.array([[-1, 1], [-1, 1], [-1, 1]]))
+                qp = qp.reshape(ssq[0], ssq[1], ssq[2], 3)
+                qp = qp[masks[i].cpu().numpy()]
+                udf[i][masks[i]] = torch.abs(sdf_field.compute_sdf(points[i], pred_normals[i], qp))
+            udf = udf.unsqueeze(1)                                             # (B, 1, r, r, r)
+            udf = torch.tanh(udf)
+
+            # 5. Gather sparse voxels (mask == True)
+            indices = torch.nonzero(masks).int()  # (M, 4) -> (batch, z, y, x)
+
+            gt_wnf_val = gt_wnf[indices[:, 0], None, indices[:, 1], indices[:, 2], indices[:, 3]]
+            gt_wnf_val = torch.tanh(gt_wnf_val)  # (M, 1)
+            udf_val = udf[indices[:, 0], :, indices[:, 1], indices[:, 2], indices[:, 3]]  # (M, 1)
+
+            feats = voxel_grid_features[indices[:, 0], indices[:, 1], indices[:, 2], indices[:, 3]].unsqueeze(1)  # (M, 1)
             feats = torch.tanh(feats)
-            feats_acc = (feats>0.0).eq(gt_wnf_val>0.0).float().mean()
-            
-            feats[feats>0.0] = 1.0
-            feats[feats<0.0] = -1.0
-            
-            gt_sdf_val = gt_sdf[indices[:,0],:,indices[:,1],indices[:,2],indices[:,3]]
-            
-            # Forward pass
-            sp_feats = sp.SparseTensor(gt_wnf_val, indices)
+            feats_acc = (feats > 0.0).eq(gt_wnf_val > 0.0).float().mean()
+
+            feats[feats > 0.0] = 1.0
+            feats[feats < 0.0] = -1.0
+            feats = torch.cat([feats, udf_val], dim=1)  # (M, 2)
+
+            # 6. Forward pass
+            sp_feats = sp.SparseTensor(feats, indices)
             sp_feats = model_encoder(sp_feats)
             sp_feats = model_decoder(sp_feats)
-            
-            indices = sp_feats.coords
-            gt_sdf_val = gt_sdf[indices[:,0],:,indices[:,1],indices[:,2],indices[:,3]]
+
             pred_val = sp_feats.feats
-            
-            # Compute metrics
+            indices_out = sp_feats.coords
+            gt_sdf_val = gt_sdf[indices_out[:, 0], :, indices_out[:, 1], indices_out[:, 2], indices_out[:, 3]]
+
+            # 7. Metrics
             loss = loss_fn(pred_val, gt_wnf_val)
-            acc = (pred_val>0.0).eq(gt_wnf_val>0.0).float().mean()
-            acc_wnf = (gt_sdf_val>0.0).eq(gt_wnf_val>0.0).float().mean()
-            
+            acc = (pred_val > 0.0).eq(gt_wnf_val > 0.0).float().mean()
+            acc_wnf = (gt_sdf_val > 0.0).eq(gt_wnf_val > 0.0).float().mean()
+
             total_loss += loss.item()
             total_acc += acc.item()
             total_acc_wnf += acc_wnf.item()
             total_feats_acc += feats_acc.item()
             num_batches += 1
-    
-    # Compute averages
-    avg_loss = total_loss / num_batches
-    avg_acc = total_acc / num_batches
-    avg_acc_wnf = total_acc_wnf / num_batches
-    avg_feats_acc = total_feats_acc / num_batches
-    
+
+    # 8. Aggregate statistics
+    avg_loss = total_loss / max(num_batches, 1)
+    avg_acc = total_acc / max(num_batches, 1)
+    avg_acc_wnf = total_acc_wnf / max(num_batches, 1)
+    avg_feats_acc = total_feats_acc / max(num_batches, 1)
+
     return avg_loss, avg_acc, avg_acc_wnf, avg_feats_acc
 
 if __name__ == "__main__":
@@ -343,7 +349,7 @@ if __name__ == "__main__":
     print(f"Validation set size: {len(val_dataloader.dataset)}")
 
     # Initialize Models
-    slat_encoder = SLatEncoder(in_dim=1).to(device)
+    slat_encoder = SLatEncoder(in_dim=2).to(device)
     grid_decoder = GridDecoder().to(device)
 
     # Optimizer
@@ -395,12 +401,27 @@ if __name__ == "__main__":
             # 3. Estimate normals using PCA -> pred_normal
             pred_normals = estimate_normals_pca(points, k=cfg["pca_knn"]) # (B, N_points, 3)
 
+
             # 4. Create voxel grid (r x r x r) from predicted normals
             voxel_grid_features,masks = op2wnf(points, pred_normals, cfg["r"], device) # (B, r, r, r)
             gt_wnf,_ = op2wnf(points, gt_normals, cfg["r"], device) # (B, r, r, r)
+            
+                        # 计算UDF
+            sdf_field = SDFField(64)
+            udf = torch.zeros([B,cfg["r"],cfg["r"],cfg["r"]]).to(device)
+            for i in range(B):
+                qp,ssq = tools.create_uniform_grid(cfg["r"],bbox=np.array([[-1,1],[-1,1],[-1,1]]))
+                qp = qp.reshape(ssq[0],ssq[1],ssq[2],3)
+                qp = qp[masks[i].cpu().numpy()]
+                udf[i][masks[i]] = torch.abs(sdf_field.compute_sdf(points[i],pred_normals[i],qp))
+            udf = udf.unsqueeze(1)
+            udf = torch.tanh(udf)
+            
+            
             indices = torch.nonzero(masks).int()            
             gt_wnf_val = gt_wnf[indices[:,0],None,indices[:,1],indices[:,2],indices[:,3]]
             gt_wnf_val = torch.tanh(gt_wnf_val) 
+            udf_val = udf[indices[:,0],:,indices[:,1],indices[:,2],indices[:,3]]
             feats = voxel_grid_features[indices[:,0],indices[:,1],indices[:,2],indices[:,3]]
             feats = feats.unsqueeze(1)
             feats = torch.tanh(feats)
@@ -411,6 +432,7 @@ if __name__ == "__main__":
             feats[feats>0.0] = 1.0
             feats[feats<0.0] = -1.0
             
+            feats = torch.cat([feats,udf_val],dim=1)
             gt_sdf_val = gt_sdf[indices[:,0],:,indices[:,1],indices[:,2],indices[:,3]]
             
             sp_feats = sp.SparseTensor(feats, indices)
@@ -459,7 +481,7 @@ if __name__ == "__main__":
 
         # Validation phase
         val_loss, val_acc, val_acc_wnf, val_feats_acc = evaluate_model(
-            slat_encoder, grid_decoder, val_dataloader, device, cfg
+            slat_encoder, grid_decoder, val_dataloader, device, cfg, loss_fn
         )
         
         print(f"\nValidation Results - Epoch {epoch+1}:")
