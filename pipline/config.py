@@ -25,7 +25,7 @@ basic_config = {
     # Decoder will output R x R x R grid
 
     # Training parameters
-    "batch_size": 1,
+    "batch_size": 2,
     "epochs": 100,
     "learning_rate": 1e-5,
     "log_interval": 1, # Print log every N batches

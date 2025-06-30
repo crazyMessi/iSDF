@@ -1,3 +1,7 @@
+
+'''
+训练一个autoencoder
+'''
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -282,7 +286,7 @@ def evaluate_model(model_encoder, model_decoder, dataloader, device, cfg, loss_f
 
             feats[feats > 0.0] = 1.0
             feats[feats < 0.0] = -1.0
-            feats = torch.cat([feats, udf_val], dim=1)  # (M, 2)
+            feats = torch.cat([gt_wnf_val, udf_val], dim=1)  # (M, 2)
 
             # 6. Forward pass
             sp_feats = sp.SparseTensor(feats, indices)
@@ -396,6 +400,7 @@ if __name__ == "__main__":
             gt_sdf = gt_sdf.unsqueeze(1)
             gt_sdf[gt_sdf>0.0] = 1
             gt_sdf[gt_sdf<0.0] = -1
+            
 
             # 3. Estimate normals using PCA -> pred_normal
             pred_normals = estimate_normals_pca(points, k=cfg["pca_knn"]) # (B, N_points, 3)
@@ -431,7 +436,7 @@ if __name__ == "__main__":
             feats1[feats1>0.0] = 1.0
             feats1[feats1<0.0] = -1.0
             
-            feats12 = torch.cat([feats1,udf_val],dim=1)
+            feats12 = torch.cat([gt_wnf_val,udf_val],dim=1)
             gt_sdf_val = gt_sdf[indices[:,0],:,indices[:,1],indices[:,2],indices[:,3]]
             
             sp_feats = sp.SparseTensor(feats12, indices)

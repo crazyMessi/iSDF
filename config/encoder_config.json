@@ -5,16 +5,6 @@
         "from_pretrain":true,
         "pretrain_path": "checkpoints/encoder.pth",
 
-        "SparseConv3dEncoder": {
-            "args": {
-                "in_channels": 2,
-                "latent_channels": 8,
-                "num_res_blocks": 2,
-                "num_res_blocks_middle": 2,
-                "channels": [32, 128, 512],
-                "use_fp16": true
-            }
-        },
         "SparseLatentEncoder": {
             "args": {
                 "resolution": 64,
