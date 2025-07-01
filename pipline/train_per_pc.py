@@ -15,6 +15,9 @@ import models.trellis.modules.sparse as sp
 import models.lzd_models.slat_net as lat_net
 import models.trellis.models.structured_latent_vae.encoder as trellis_spvae_encoder
 import models.trellis.models as trellis_models
+from torch.utils.tensorboard import SummaryWriter
+import time
+import datetime
 
 
 
@@ -225,7 +228,7 @@ def check_model_params(model, model_name="Model"):
     
     return has_nan, has_inf
 
-def evaluate_model(model_encoder, model_decoder, dataloader, device, cfg, loss_fn):
+def evaluate_model(model_encoder, model_decoder, dataloader, device, cfg, loss_fn, epoch=None, save_results=False):
     """
     Evaluates the model on the validation/test set using **exactly** the same
     data-preparation pipeline as the training loop so that no distribution
@@ -267,7 +270,7 @@ def evaluate_model(model_encoder, model_decoder, dataloader, device, cfg, loss_f
                 qp = qp[masks[i].cpu().numpy()]
                 udf[i][masks[i]] = torch.abs(sdf_field.compute_sdf(points[i], pred_normals[i], qp))
             udf = udf.unsqueeze(1)                                             # (B, 1, r, r, r)
-            udf = torch.tanh(udf)
+            # udf = torch.tanh(udf)
 
             # 5. Gather sparse voxels (mask == True)
             indices = torch.nonzero(masks).int()  # (M, 4) -> (batch, z, y, x)
@@ -303,8 +306,114 @@ def evaluate_model(model_encoder, model_decoder, dataloader, device, cfg, loss_f
             total_acc_wnf += acc_wnf.item()
             total_feats_acc += feats_acc.item()
             num_batches += 1
+            
+            # 8. Save validation results if requested
+            if save_results and epoch is not None:
+                val_save_dir = f"val_results/epoch_{epoch}"
+                os.makedirs(val_save_dir, exist_ok=True)
+                
+                # For each item in the batch
+                for i in range(B):
+                    batch_save_dir = f"{val_save_dir}/batch_{batch_idx}_item_{i}"
+                    os.makedirs(batch_save_dir, exist_ok=True)
+                    
+                    # Create full prediction SDF grid
+                    pred_sdf = torch.zeros_like(gt_sdf)
+                    batch_mask = indices_out[:, 0] == i
+                    if batch_mask.any():
+                        batch_indices = indices_out[batch_mask]
+                        batch_pred_val = pred_val[batch_mask]
+                        pred_sdf[i, :, batch_indices[:, 1], batch_indices[:, 2], batch_indices[:, 3]] = batch_pred_val
+                    
+                    # Save meshes
+                    try:
+                        # Extract and save GT SDF surface
+                        tools.extract_surface_from_scalar_field(
+                            gt_sdf[i].squeeze().cpu().numpy(), 
+                            level=0, 
+                            resolution=cfg["R"], 
+                            save_path=f"{batch_save_dir}/gt_sdf.ply",
+                            mask=None  # Use full grid for GT
+                        )
+                        
+                        # Extract and save predicted SDF surface
+                        tools.extract_surface_from_scalar_field(
+                            pred_sdf[i].squeeze().cpu().detach().numpy(), 
+                            level=0, 
+                            resolution=cfg["R"], 
+                            save_path=f"{batch_save_dir}/pred_sdf.ply",
+                            mask=masks[i].cpu().numpy()
+                        )
+                        
+                        # Extract and save GT WNF surface
+                        tools.extract_surface_from_scalar_field(
+                            gt_wnf[i].squeeze().cpu().numpy(), 
+                            level=0, 
+                            resolution=cfg["r"], 
+                            save_path=f"{batch_save_dir}/gt_wnf.ply",
+                            mask=masks[i].cpu().numpy()
+                        )
+                        
+                        # Save original GT mesh
+                        import open3d as o3d
+                        o3d.io.write_triangle_mesh(
+                            f"{batch_save_dir}/gt_mesh.ply",
+                            o3d.geometry.TriangleMesh(
+                                o3d.utility.Vector3dVector(vertices[i].cpu().numpy()),
+                                o3d.utility.Vector3iVector(faces[i].cpu().numpy())
+                            )
+                        )
+                        
+                        # Save point cloud with normals
+                        pcd = o3d.geometry.PointCloud()
+                        pcd.points = o3d.utility.Vector3dVector(points[i].cpu().numpy())
+                        pcd.normals = o3d.utility.Vector3dVector(pred_normals[i].cpu().numpy())
+                        o3d.io.write_point_cloud(f"{batch_save_dir}/input_points_with_normals.ply", pcd)
+                        
+                    except Exception as e:
+                        print(f"Warning: Could not save mesh for validation batch {batch_idx}, item {i}: {e}")
+                    
+                    # Save scalar fields as numpy arrays
+                    try:
+                        np.save(f"{batch_save_dir}/gt_sdf.npy", gt_sdf[i].cpu().numpy())
+                        np.save(f"{batch_save_dir}/pred_sdf.npy", pred_sdf[i].cpu().detach().numpy())
+                        np.save(f"{batch_save_dir}/gt_wnf.npy", gt_wnf[i].cpu().numpy())
+                        np.save(f"{batch_save_dir}/udf.npy", udf[i].cpu().numpy())
+                        np.save(f"{batch_save_dir}/mask.npy", masks[i].cpu().numpy())
+                        np.save(f"{batch_save_dir}/voxel_grid_features.npy", voxel_grid_features[i].cpu().numpy())
+                        
+                        # Save input data
+                        np.save(f"{batch_save_dir}/input_points.npy", points[i].cpu().numpy())
+                        np.save(f"{batch_save_dir}/pred_normals.npy", pred_normals[i].cpu().numpy())
+                        np.save(f"{batch_save_dir}/gt_normals.npy", gt_normals[i].cpu().numpy())
+                        np.save(f"{batch_save_dir}/vertices.npy", vertices[i].cpu().numpy())
+                        np.save(f"{batch_save_dir}/faces.npy", faces[i].cpu().numpy())
+                        
+                    except Exception as e:
+                        print(f"Warning: Could not save numpy arrays for validation batch {batch_idx}, item {i}: {e}")
+                    
+                    # Save metrics for this sample
+                    try:
+                        metrics = {
+                            'loss': loss.item(),
+                            'accuracy': acc.item(),
+                            'accuracy_wnf': acc_wnf.item(),
+                            'feats_accuracy': feats_acc.item(),
+                            'num_valid_voxels': masks[i].sum().item(),
+                            'total_voxels': masks[i].numel()
+                        }
+                        
+                        with open(f"{batch_save_dir}/metrics.json", 'w') as f:
+                            json.dump(metrics, f, indent=2)
+                            
+                    except Exception as e:
+                        print(f"Warning: Could not save metrics for validation batch {batch_idx}, item {i}: {e}")
+                
+                # Only save first few batches to avoid too much storage
+                if batch_idx >= 2:  # Save first 3 batches
+                    break
 
-    # 8. Aggregate statistics
+    # 9. Aggregate statistics
     avg_loss = total_loss / max(num_batches, 1)
     avg_acc = total_acc / max(num_batches, 1)
     avg_acc_wnf = total_acc_wnf / max(num_batches, 1)
@@ -318,6 +427,7 @@ if __name__ == "__main__":
     parser.add_argument('--gpu', type=int, default=None, help='GPU ID to use (e.g., 0, 1, etc.)')
     parser.add_argument('--dataset_name', type=str, default=None, help='Dataset name')
     parser.add_argument('--val_split', type=float, default=0.1, help='Validation set split ratio')
+    parser.add_argument('--save_val_results', action='store_true', help='Save validation results (meshes, grids, etc.)')
     
     args = parser.parse_args()
 
@@ -362,10 +472,34 @@ if __name__ == "__main__":
     # Loss Function
     loss_fn = CustomLoss()
     
+    # Initialize TensorBoard SummaryWriter
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_dir = f"runs/train_{args.dataset_name}_{timestamp}" if args.dataset_name else f"runs/train_{timestamp}"
+    writer = SummaryWriter(log_dir=log_dir)
+    print(f"TensorBoard logs will be saved to: {log_dir}")
+    print(f"To view logs, run: tensorboard --logdir={log_dir}")
+    
+    # Log hyperparameters
+    hparams = {
+        'learning_rate': cfg["learning_rate"],
+        'batch_size': cfg["batch_size"],
+        'epochs': cfg["epochs"],
+        'R': cfg["R"],
+        'r': cfg["r"],
+        'pca_knn': cfg["pca_knn"],
+        'num_samples': cfg["num_samples"],
+        'val_split': args.val_split,
+        'device': str(device)
+    }
+    writer.add_hparams(hparams, {'hparam/best_val_loss': float('inf'), 'hparam/best_val_acc': 0.0})
+    
     # Training Loop
     pointcloud_voxel_resolution = cfg["r"]
     best_val_loss = float('inf')
     best_val_acc = 0.0
+    
+    # Add model architecture to tensorboard (will be done on first forward pass)
+    model_logged = False
     
     for epoch in range(cfg["epochs"]):
         # Training phase
@@ -406,7 +540,7 @@ if __name__ == "__main__":
             gt_wnf,_ = op2wnf(points, gt_normals, cfg["r"], device) # (B, r, r, r)
             
                         # 计算UDF
-            sdf_field = SDFField(64)
+            sdf_field = SDFField(cfg["r"])
             udf = torch.zeros([B,cfg["r"],cfg["r"],cfg["r"]]).to(device)
             for i in range(B):
                 qp,ssq = tools.create_uniform_grid(cfg["r"],bbox=np.array([[-1,1],[-1,1],[-1,1]]))
@@ -442,12 +576,34 @@ if __name__ == "__main__":
             gt_sdf_val = gt_sdf[indices[:,0],:,indices[:,1],indices[:,2],indices[:,3]]
             pred_val = sp_feats.feats
             
+            # Log model graph to tensorboard (only once)
+            if not model_logged and batch_idx == 0 and epoch == 0:
+                try:
+                    # Create a sample input for graph logging
+                    sample_input = sp.SparseTensor(feats12[:100], indices[:100])  # Use first 100 points
+                    writer.add_graph(slat_encoder, sample_input)
+                    model_logged = True
+                    print("Model graph added to TensorBoard")
+                except Exception as e:
+                    print(f"Could not add model graph to TensorBoard: {e}")
+                    model_logged = True  # Don't try again
+            
             loss = loss_fn(pred_val, gt_wnf_val)
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
             total_grad_norm_encoder = get_total_grad_norm(slat_encoder)
             total_grad_norm_decoder = get_total_grad_norm(grid_decoder)
+            
+            # Calculate global step for tensorboard logging
+            global_step = epoch * len(train_dataloader) + batch_idx
+            
+            # Log to tensorboard every batch
+            writer.add_scalar('Train/Loss', loss.item(), global_step)
+            writer.add_scalar('Train/GradNorm_Encoder', total_grad_norm_encoder, global_step)
+            writer.add_scalar('Train/GradNorm_Decoder', total_grad_norm_decoder, global_step)
+            writer.add_scalar('Train/Learning_Rate', optimizer.param_groups[0]['lr'], global_step)
+            
             print(f"Epoch {epoch+1}/{cfg['epochs']}, Batch {batch_idx+1}/{len(train_dataloader)}, Loss: {loss.item():.6f}, encoder_Total_grad_norm: {total_grad_norm_encoder:.6f}, decoder_Total_grad_norm: {total_grad_norm_decoder:.6f}")
 
             if batch_idx % cfg["log_interval"] == 0:
@@ -455,33 +611,57 @@ if __name__ == "__main__":
                 loss_gt_wnf = loss_fn(gt_wnf_val,gt_sdf_val)
                 acc_wnf = (gt_sdf_val>0.0).eq(gt_wnf_val>0.0).float().mean()
                 
+                # Log detailed metrics to tensorboard
+                writer.add_scalar('Train/Accuracy', acc.item(), global_step)
+                writer.add_scalar('Train/Accuracy_WNF', acc_wnf.item(), global_step)
+                writer.add_scalar('Train/Feats_Accuracy', feats_acc.item(), global_step)
+                writer.add_scalar('Train/Loss_GT_WNF', loss_gt_wnf.item(), global_step)
+                
                 print(f"Epoch {epoch+1}/{cfg['epochs']}, Batch {batch_idx+1}/{len(train_dataloader)}, Loss: {loss.item():.6f}, Acc: {acc.item():.6f}, Acc_wnf: {acc_wnf.item():.6f}, Loss_gt_wnf: {loss_gt_wnf.item():.6f}, Feats_acc: {feats_acc.item():.6f}")
                 ifview = False
                 if True:
-                    os.makedirs("test_results",exist_ok=True)
-                    os.makedirs("test_results/mesh_{}".format(batch_idx),exist_ok=True)
-                    tools.extract_surface_from_scalar_field(gt_sdf[0].squeeze().cpu().numpy(),level=0,resolution=cfg["r"],save_path="test_results/mesh_{}/gt_sdf.ply".format(batch_idx),mask=masks[0].cpu().numpy())
+                    os.makedirs("train_results",exist_ok=True)
+                    os.makedirs("train_results/mesh_{}".format(batch_idx),exist_ok=True)
+                    tools.extract_surface_from_scalar_field(gt_sdf[0].squeeze().cpu().numpy(),level=0,resolution=cfg["r"],save_path="train_results/mesh_{}/gt_sdf.ply".format(batch_idx),mask=masks[0].cpu().numpy())
                     pred_sdf = torch.zeros_like(gt_sdf)
                     pred_sdf[indices[:,0],:,indices[:,1],indices[:,2],indices[:,3]] = pred_val
-                    tools.extract_surface_from_scalar_field(pred_sdf[0].squeeze().cpu().detach().numpy(),level=0,resolution=cfg["r"],save_path="test_results/mesh_{}/pred_sdf.ply".format(batch_idx),mask=masks[0].cpu().numpy())
-                    tools.extract_surface_from_scalar_field(gt_wnf[0].squeeze().cpu().numpy(),level=0,resolution=cfg["r"],save_path="test_results/mesh_{}/gt_wnf.ply".format(batch_idx),mask=masks[0].cpu().numpy())
+                    tools.extract_surface_from_scalar_field(pred_sdf[0].squeeze().cpu().detach().numpy(),level=0,resolution=cfg["r"],save_path="train_results/mesh_{}/pred_sdf.ply".format(batch_idx),mask=masks[0].cpu().numpy())
+                    tools.extract_surface_from_scalar_field(gt_wnf[0].squeeze().cpu().numpy(),level=0,resolution=cfg["r"],save_path="train_results/mesh_{}/gt_wnf.ply".format(batch_idx),mask=masks[0].cpu().numpy())
                     # 保存vertices和faces为ply
                     import open3d as o3d
-                    o3d.io.write_triangle_mesh("test_results/mesh_{}/gt_mesh.ply".format(batch_idx),o3d.geometry.TriangleMesh(o3d.utility.Vector3dVector(vertices[0].cpu().numpy()),o3d.utility.Vector3iVector(faces[0].cpu().numpy())))
+                    o3d.io.write_triangle_mesh("train_results/mesh_{}/gt_mesh.ply".format(batch_idx),o3d.geometry.TriangleMesh(o3d.utility.Vector3dVector(vertices[0].cpu().numpy()),o3d.utility.Vector3iVector(faces[0].cpu().numpy())))
                     # 保存field
-                    np.save("test_results/mesh_{}/gt_sdf.npy".format(batch_idx),gt_sdf[0].cpu().numpy())
-                    np.save("test_results/mesh_{}/pred_sdf.npy".format(batch_idx),pred_sdf[0].cpu().detach().numpy())
-                    np.save("test_results/mesh_{}/gt_wnf.npy".format(batch_idx),gt_wnf[0].cpu().numpy())
+                    np.save("train_results/mesh_{}/gt_sdf.npy".format(batch_idx),gt_sdf[0].cpu().numpy())
+                    np.save("train_results/mesh_{}/pred_sdf.npy".format(batch_idx),pred_sdf[0].cpu().detach().numpy())
+                    np.save("train_results/mesh_{}/gt_wnf.npy".format(batch_idx),gt_wnf[0].cpu().numpy())
+                    
+                    # Log some scalar field slices to tensorboard for visualization
+                    if batch_idx == 0:  # Only log for first batch to avoid cluttering
+                        # Log middle slice of the 3D fields
+                        mid_slice = cfg["r"] // 2
+                        writer.add_image('Visualization/GT_SDF_Slice', 
+                                       gt_sdf[0, 0, mid_slice:mid_slice+1, :, :], 
+                                       global_step, dataformats='CHW')
+                        writer.add_image('Visualization/Pred_SDF_Slice', 
+                                       pred_sdf[0, 0, mid_slice:mid_slice+1, :, :], 
+                                       global_step, dataformats='CHW')
+                        writer.add_image('Visualization/GT_WNF_Slice', 
+                                       gt_wnf[0, None, mid_slice, :, :], 
+                                       global_step, dataformats='CHW')
                     
                     # import view
-                    # view.view_data(gt_sdf[0].cpu().numpy())
-                    # view.view_data(pred_sdf[0].cpu().numpy())
-                    # view.view_data(gt_wnf[0].cpu().numpy())
 
         # Validation phase
+        save_val_results = args.save_val_results and (epoch % 5 == 0 or epoch == cfg["epochs"] - 1)  # Save every 5 epochs and last epoch
         val_loss, val_acc, val_acc_wnf, val_feats_acc = evaluate_model(
-            slat_encoder, grid_decoder, val_dataloader, device, cfg, loss_fn
+            slat_encoder, grid_decoder, val_dataloader, device, cfg, loss_fn, epoch, save_val_results
         )
+        
+        # Log validation metrics to tensorboard
+        writer.add_scalar('Val/Loss', val_loss, epoch)
+        writer.add_scalar('Val/Accuracy', val_acc, epoch)
+        writer.add_scalar('Val/Accuracy_WNF', val_acc_wnf, epoch)
+        writer.add_scalar('Val/Feats_Accuracy', val_feats_acc, epoch)
         
         print(f"\nValidation Results - Epoch {epoch+1}:")
         print(f"Loss: {val_loss:.6f}, Acc: {val_acc:.6f}")
@@ -494,6 +674,7 @@ if __name__ == "__main__":
         # Save best model
         if val_loss < best_val_loss:
             best_val_loss = val_loss
+            best_val_acc = val_acc
             torch.save({
                 'epoch': epoch,
                 'model_state_dict': slat_encoder.state_dict(),
@@ -501,6 +682,11 @@ if __name__ == "__main__":
                 'val_loss': val_loss,
                 'val_acc': val_acc
             }, "temp/checkpoints/best_model.pth")
+            
+            # Log best model metrics
+            writer.add_scalar('Best/Loss', val_loss, epoch)
+            writer.add_scalar('Best/Accuracy', val_acc, epoch)
+            
             print(f"Saved new best model with validation loss: {val_loss:.6f}")
         
         if epoch % cfg["save_checkpoint_interval"] == 0:
@@ -513,6 +699,14 @@ if __name__ == "__main__":
             }, f"temp/checkpoints/model_{epoch}.pth")
 
     print("Training finished.")
+    
+    # Update hyperparameters with final results
+    writer.add_hparams(hparams, {'hparam/best_val_loss': best_val_loss, 'hparam/best_val_acc': best_val_acc})
+    
+    # Close tensorboard writer
+    writer.close()
+    print(f"TensorBoard logs saved to: {log_dir}")
+    print("Training completed successfully!")
 
 
 
