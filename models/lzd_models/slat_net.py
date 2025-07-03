@@ -6,8 +6,60 @@ import numpy as np
 from ..trellis.modules.utils import zero_module, convert_module_to_f16, convert_module_to_f32
 from ..trellis.modules import sparse as sp
 from ..trellis.models.structured_latent_vae.base import SparseTransformerBase
+from ..trellis.models.structured_latent_flow import SparseResBlock3d
+from ..trellis.modules.norm import LayerNorm32
 
 
+
+'''
+相当于SparseResBlock3d，但是没有emb
+'''
+class SparseResConv3d(nn.Module):
+    def __init__(
+        self,
+        channels: int,
+        out_channels: Optional[int] = None,
+        downsample: bool = False,
+        upsample: bool = False,
+    ):
+        super().__init__()
+        self.channels = channels
+        self.out_channels = out_channels or channels
+        self.downsample = downsample
+        self.upsample = upsample
+        
+        assert not (downsample and upsample), "Cannot downsample and upsample at the same time"
+
+        self.norm1 = LayerNorm32(channels, elementwise_affine=True, eps=1e-6)
+        self.norm2 = LayerNorm32(self.out_channels, elementwise_affine=False, eps=1e-6)
+        self.conv1 = sp.SparseConv3d(channels, self.out_channels, 3)
+        self.conv2 = zero_module(sp.SparseConv3d(self.out_channels, self.out_channels, 3))
+        self.skip_connection = sp.SparseLinear(channels, self.out_channels) if channels != self.out_channels else nn.Identity()
+        self.updown = None
+        if self.downsample:
+            self.updown = sp.SparseDownsample(2)
+        elif self.upsample:
+            self.updown = sp.SparseUpsample(2)
+
+    def _updown(self, x: sp.SparseTensor) -> sp.SparseTensor:
+        if self.updown is not None:
+            x = self.updown(x)
+        return x
+
+    def convert_to_fp16(self):
+        self.apply(convert_module_to_f16)
+
+    def forward(self, x: sp.SparseTensor) -> sp.SparseTensor:
+        x = self._updown(x)
+        h = x.replace(self.norm1(x.feats))
+        h = h.replace(F.silu(h.feats))
+        h = self.conv1(h)
+        h = h.replace(self.norm2(h.feats))
+        h = h.replace(F.silu(h.feats))
+        h = self.conv2(h)
+        h = h + self.skip_connection(x)
+        return h
+    
 # 线性+layer norm+tanh lizd
 class L_L_T(nn.Module):
     def __init__(self, in_features, out_features, bias=True):
@@ -22,6 +74,9 @@ class L_L_T(nn.Module):
     def forward(self, input: sp.SparseTensor) -> sp.SparseTensor:
         return input.replace(self.activate(self.norm(self.linear(input.feats))))
     
+    def convert_to_fp16(self):
+        self.apply(convert_module_to_f16)
+    
     def initialize_weights(self) -> None:
         nn.init.xavier_uniform_(self.linear.weight)
         nn.init.zeros_(self.linear.bias)
@@ -30,7 +85,6 @@ class L_L_T(nn.Module):
 class SLatEncoder(SparseTransformerBase):
     def __init__(
         self,
-        resolution: int,
         in_channels: int,
         model_channels: int,
         latent_channels: int,
@@ -44,7 +98,6 @@ class SLatEncoder(SparseTransformerBase):
         use_fp16: bool = False,
         use_checkpoint: bool = False,
         qk_rms_norm: bool = False,
-        model2latent: List[int] = None,
     ):
         super().__init__(
             in_channels=in_channels,
@@ -60,16 +113,7 @@ class SLatEncoder(SparseTransformerBase):
             use_checkpoint=use_checkpoint,
             qk_rms_norm=qk_rms_norm,
         )
-        self.resolution = resolution
-        
-        layers = []
-        for i in range(len(model2latent)-1):
-            layers.append(L_L_T(model2latent[i], model2latent[i+1]))
-        layers.append(L_L_T(model2latent[-1], latent_channels * 2))
-            
-        
-        self.model2latent_layers = nn.Sequential(*layers)
-        self.out_layer = L_L_T(latent_channels * 2, latent_channels * 2) # 输出mean和logvar
+        self.out_layer = sp.SparseLinear(model_channels, latent_channels * 2)
         
         self.initialize_weights()
         if use_fp16:
@@ -78,18 +122,12 @@ class SLatEncoder(SparseTransformerBase):
     def initialize_weights(self) -> None:
         super().initialize_weights()
         # Zero-out output layers:
-        # nn.init.constant_(self.out_layer.weight, 0)
-        # nn.init.constant_(self.out_layer.bias, 0)
-        for layer in self.model2latent_layers:
-            if isinstance(layer, L_L_T):
-                layer.initialize_weights()
-        self.out_layer.initialize_weights()
+        nn.init.constant_(self.out_layer.weight, 0)
+        nn.init.constant_(self.out_layer.bias, 0)
 
     def forward(self, x: sp.SparseTensor, sample_posterior=True, return_raw=False):
         h = super().forward(x)
-        h = h.type(x.dtype)
         h = h.replace(F.layer_norm(h.feats, h.feats.shape[-1:]))
-        h = self.model2latent_layers(h)
         h = self.out_layer(h)
         
         # TODO: 检查是否有用 Sample from the posterior distribution
@@ -114,7 +152,6 @@ class SLatEncoder(SparseTransformerBase):
 class SLatVoxelDecoder(SparseTransformerBase):
     def __init__(
         self,
-        resolution: int,
         model_channels: int, # qkv_dim？
         out_channels: int, # 输出的channels
         latent_channels: int, # 输入的latent channels
@@ -145,7 +182,6 @@ class SLatVoxelDecoder(SparseTransformerBase):
             use_checkpoint=use_checkpoint,
             qk_rms_norm=qk_rms_norm,
         )
-        self.resolution = resolution
         self.rep_config = representation_config
         
         # self.out_layer = sp.SparseLinear(model_channels, out_channels)
@@ -182,4 +218,85 @@ class SLatVoxelDecoder(SparseTransformerBase):
         super().convert_to_fp16()
     def convert_to_fp32(self) -> None:
         super().convert_to_fp32()
-    
+        
+class VoxelGridVAE(nn.Module):
+    def __init__(self, 
+                 input_channels, 
+                 output_channels,
+                 num_io_res_blocks,
+                 io_block_channels,
+                 use_fp16,
+                 model_channels,
+                 use_skip_connections,
+                 encoder_config,
+                 decoder_config,
+                 ):
+        super(VoxelGridVAE, self).__init__()
+        self.use_skip_connections = use_skip_connections
+        self.input_dim = input_channels
+        self.model_channels = model_channels
+        self.num_io_res_blocks = num_io_res_blocks
+        self.io_block_channels = io_block_channels
+        self.use_fp16 = use_fp16
+        
+        self.input_layer = sp.SparseLinear(input_channels,io_block_channels[0])
+        self.input_blocks = nn.ModuleList([])
+        for chs, next_chs in zip(io_block_channels, io_block_channels[1:] + [self.model_channels]):
+            self.input_blocks.extend([
+                SparseResConv3d(chs,chs) 
+                for _ in range(num_io_res_blocks-1)
+            ])
+            self.input_blocks.append(SparseResConv3d(chs,next_chs,downsample=True))
+        self.output_blocks = nn.ModuleList([])
+        for chs, prev_chs in zip(reversed(io_block_channels), [self.model_channels] + list(reversed(io_block_channels))[1:]):
+            self.output_blocks.append(
+                SparseResConv3d(
+                    prev_chs * 2 if self.use_skip_connections else prev_chs,
+                    chs,
+                    upsample=True
+                )
+            )
+            self.output_blocks.extend([
+                SparseResConv3d(chs*2 if self.use_skip_connections else chs,chs)
+                for _ in range(num_io_res_blocks-1)
+            ])
+            
+        self.out_layer = sp.SparseLinear(io_block_channels[0],output_channels)
+                
+        self.ss_encoder = SLatEncoder(**encoder_config)
+        self.ss_decoder = SLatVoxelDecoder(**decoder_config)
+        
+        self.activation = nn.Tanh()
+        
+        if use_fp16:
+            self.convert_to_fp16()
+        
+    def convert_to_fp16(self):
+        for block in self.input_blocks:
+            block.convert_to_fp16()
+        for block in self.output_blocks:
+            block.convert_to_fp16()
+        self.ss_encoder.convert_to_fp16()
+        self.ss_decoder.convert_to_fp16()
+        self.input_layer.apply(convert_module_to_f16)
+        self.out_layer.apply(convert_module_to_f16)
+        
+    def forward(self, x):
+        h = self.input_layer(x)
+        skips = []
+        for block in self.input_blocks:
+            h = block(h)
+            skips.append(h.feats)
+        h = self.ss_encoder(h)
+        h = self.ss_decoder(h)
+        
+        for block, skip in zip(self.output_blocks, reversed(skips)):
+            if self.use_skip_connections:
+                h = block(h.replace(torch.cat([h.feats, skip], dim=1)))
+            else:
+                h = block(h)
+        h = h.replace(F.layer_norm(h.feats, h.feats.shape[1:]))
+        h = self.out_layer(h.type(x.dtype))
+        h = self.activation(h)
+        return h
+        

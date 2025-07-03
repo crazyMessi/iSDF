@@ -1,0 +1,32 @@
+{
+    "name": "VoxelGridVAE",
+    "model": {
+        "num_io_res_blocks": 2,
+        "io_block_channels": [128],
+        "use_fp16": true,
+        "model_channels": 128,
+
+        "SparseLatentEncoder": {
+            "args": {
+                "model_channels": 768,
+                "latent_channels": 128,
+                "num_blocks": 12,
+                "num_heads": 12,
+                "mlp_ratio": 4,
+                "attn_mode": "swin",
+                "window_size": 8
+            }
+        },
+
+        "SlatVoxelDecoder": {
+            "args":{
+                "model_channels": 512,
+                "model2rep": [512,1],
+                "latent_channels": 128,
+                "out_channels": 1,
+                "num_blocks": 8,
+                "num_heads": 8
+            }
+        }
+    }
+}

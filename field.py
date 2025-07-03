@@ -173,7 +173,7 @@ class SDFField:
     def __init__(self, resolution=64):
         self.resolution = resolution
     
-    def compute_sdf(self, points, normals, voxel_grid):
+    def compute_sdf(self, points:torch.Tensor, normals:torch.Tensor, voxel_grid:torch.Tensor):
         """
         Compute SDF values for a voxel grid given oriented point cloud
         Args:
@@ -208,7 +208,7 @@ class SDFField:
         closest_normals = normals_np[indices.flatten()]
         
         # Compute vectors from closest points to voxels
-        vectors = voxel_grid - closest_points
+        vectors = voxel_grid_np - closest_points
         
         # Compute signed distances: dot product of vectors with normals
         sign = np.sum(vectors * closest_normals, axis=1)
