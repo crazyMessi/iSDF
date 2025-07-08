@@ -286,4 +286,4 @@ class VoxelGridVAE(nn.Module):
         h = self.out_layer(h.type(x.dtype))
         h = h.replace(self.activation(h.feats))
         return h
-        
+

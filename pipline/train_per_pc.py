@@ -313,9 +313,11 @@ def evaluate_model(model, dataloader, device, cfg, loss_fn, epoch=None, save_res
                 # 计算wnf (same as training)
                 wnf_i = cal_wnf.compute_winding_number_torch_api(points[i],pred_normals[i],query_points_i,epsilon=1e-8,batch_size=10000)
                 gt_wnf_i = cal_wnf.compute_winding_number_torch_api(points[i],gt_normals[i],query_points_i,epsilon=1e-8,batch_size=10000)
+                pred_wnf_grad_i = cal_wnf.compute_winding_number_torch_api(points[i],pred_normals[i],query_points_i,epsilon=1e-8,batch_size=10000)
+                
                 pred_wnf[i][mask_cuda] = wnf_i
                 gt_wnf[i][mask_cuda] = gt_wnf_i
-                
+                pred_wnf_grad[i][mask_cuda] = pred_wnf_grad_i
                 # 计算sdf (same as training)
                 mesh_sdf = MeshSDF(vertices[i].cpu().numpy(), faces[i].cpu().numpy())
                 sdf_values = mesh_sdf.query(query_points_i.cpu().numpy())
@@ -332,8 +334,10 @@ def evaluate_model(model, dataloader, device, cfg, loss_fn, epoch=None, save_res
             pred_udf_val = pred_udf[indices[:,0],indices[:,1],indices[:,2],indices[:,3]]
             wnf_val = pred_wnf[indices[:,0],indices[:,1],indices[:,2],indices[:,3]]
             gt_wnf_val = gt_wnf[indices[:,0],indices[:,1],indices[:,2],indices[:,3]]
+            pred_wnf_grad_val = pred_wnf_grad[indices[:,0],indices[:,1],indices[:,2],indices[:,3]]
             wnf_val = torch.tanh(wnf_val)
             gt_wnf_val = torch.tanh(gt_wnf_val)
+            pred_wnf_grad_val = torch.tanh(pred_wnf_grad_val)
             
             # 5. Create features (same as training)
             feats1 = wnf_val

@@ -2,7 +2,7 @@ import torch
 
 basic_config = {
     # Data parameters
-    "num_samples": 2048,  # Number of points to sample from each mesh
+    "num_samples": 10000,  # Number of points to sample from each mesh
     # Model general parameters
     "device": 'cuda' if torch.cuda.is_available() else 'cpu',
     "R": 256,  # Resolution for GT SDF grid and final predicted SDF grid (R x R x R)
@@ -16,7 +16,7 @@ basic_config = {
     "pca_knn": 10, # k-nearest neighbors for PCA normal estimation
 
     # Training parameters
-    "batch_size": 1,
+    "batch_size": 2,
     "epochs": 100,
     "learning_rate": 1e-5,
     "log_interval": 1, # Print log every N batches
