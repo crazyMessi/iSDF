@@ -5,6 +5,9 @@
         "io_block_channels": [128],
         "use_fp16": true,
         "model_channels": 128,
+        "use_skip_connections": true,
+        "input_channels": 1,
+        "output_channels": 1,
 
         "SparseLatentEncoder": {
             "args": {
@@ -21,9 +24,8 @@
         "SlatVoxelDecoder": {
             "args":{
                 "model_channels": 512,
-                "model2rep": [512,1],
                 "latent_channels": 128,
-                "out_channels": 1,
+                "out_channels": 128,
                 "num_blocks": 8,
                 "num_heads": 8
             }

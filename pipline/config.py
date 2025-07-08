@@ -16,7 +16,7 @@ basic_config = {
     "pca_knn": 10, # k-nearest neighbors for PCA normal estimation
 
     # Training parameters
-    "batch_size": 2,
+    "batch_size": 1,
     "epochs": 100,
     "learning_rate": 1e-5,
     "log_interval": 1, # Print log every N batches
@@ -24,6 +24,7 @@ basic_config = {
 
     # Other
     "use_torch_dataloader": True, # From original train_per_pc.py
+    "loss_fn": "CustomLoss",
 } 
 
 def get_config(*args, **kwargs):

@@ -8,7 +8,6 @@ import pysdf
 import trimesh
 from scipy.spatial import cKDTree
 
-
 class MeshSDF:
     def __init__(self, vertices, faces):
         """

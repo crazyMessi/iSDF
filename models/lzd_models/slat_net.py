@@ -128,6 +128,7 @@ class SLatEncoder(SparseTransformerBase):
     def forward(self, x: sp.SparseTensor, sample_posterior=True, return_raw=False):
         h = super().forward(x)
         h = h.replace(F.layer_norm(h.feats, h.feats.shape[-1:]))
+        h = h.type(x.dtype)
         h = self.out_layer(h)
         
         # TODO: 检查是否有用 Sample from the posterior distribution
@@ -143,7 +144,6 @@ class SLatEncoder(SparseTransformerBase):
             return z, mean, logvar
         else:
             return z
-   
 
 '''
 改编自SLAT的MeshDecoder
@@ -166,7 +166,6 @@ class SLatVoxelDecoder(SparseTransformerBase):
         use_checkpoint: bool = False,
         qk_rms_norm: bool = False,
         representation_config: dict = None,
-        model2rep: List[int] = None,
     ):
         super().__init__(
             in_channels=latent_channels,
@@ -184,15 +183,7 @@ class SLatVoxelDecoder(SparseTransformerBase):
         )
         self.rep_config = representation_config
         
-        # self.out_layer = sp.SparseLinear(model_channels, out_channels)
-        
-        layers = []
-        for i in range(len(model2rep)-2):
-            layers.append(L_L_T(model2rep[i], model2rep[i+1]))
-        self.model2rep_layers = nn.Sequential(*layers)
-        assert model2rep[-1] == out_channels
-        self.out_layer = nn.Linear(model2rep[-2], model2rep[-1])
-
+        self.out_layer = sp.SparseLinear(model_channels, out_channels)
         self.initialize_weights()
         if use_fp16:
             self.convert_to_fp16()
@@ -200,19 +191,13 @@ class SLatVoxelDecoder(SparseTransformerBase):
     def forward(self, x: sp.SparseTensor) -> sp.SparseTensor:
         h = super().forward(x)
         h = h.type(x.dtype)
-        h = self.model2rep_layers(h)
-        # TODO: 检查是否有用
-        feats = F.normalize(h.feats)
-        h = h.replace(self.out_layer(feats))
+        h = self.out_layer(h)
         return h
 
     def initialize_weights(self) -> None:
         super().initialize_weights()
         nn.init.xavier_uniform_(self.out_layer.weight)
         nn.init.zeros_(self.out_layer.bias)
-        for layer in self.model2rep_layers:
-            if isinstance(layer, L_L_T):
-                layer.initialize_weights()
     
     def convert_to_fp16(self) -> None:
         super().convert_to_fp16()
@@ -272,14 +257,15 @@ class VoxelGridVAE(nn.Module):
             self.convert_to_fp16()
         
     def convert_to_fp16(self):
-        for block in self.input_blocks:
-            block.convert_to_fp16()
-        for block in self.output_blocks:
-            block.convert_to_fp16()
-        self.ss_encoder.convert_to_fp16()
-        self.ss_decoder.convert_to_fp16()
-        self.input_layer.apply(convert_module_to_f16)
-        self.out_layer.apply(convert_module_to_f16)
+        # for block in self.input_blocks:
+        #     block.convert_to_fp16()
+        # for block in self.output_blocks:
+        #     block.convert_to_fp16()
+        # self.ss_encoder.convert_to_fp16()
+        # self.ss_decoder.convert_to_fp16()
+        # self.input_layer.apply(convert_module_to_f16)
+        # self.out_layer.apply(convert_module_to_f16)
+        pass
         
     def forward(self, x):
         h = self.input_layer(x)
@@ -289,6 +275,7 @@ class VoxelGridVAE(nn.Module):
             skips.append(h.feats)
         h = self.ss_encoder(h)
         h = self.ss_decoder(h)
+        h = h.type(x.dtype)
         
         for block, skip in zip(self.output_blocks, reversed(skips)):
             if self.use_skip_connections:
@@ -297,6 +284,6 @@ class VoxelGridVAE(nn.Module):
                 h = block(h)
         h = h.replace(F.layer_norm(h.feats, h.feats.shape[1:]))
         h = self.out_layer(h.type(x.dtype))
-        h = self.activation(h)
+        h = h.replace(self.activation(h.feats))
         return h
         

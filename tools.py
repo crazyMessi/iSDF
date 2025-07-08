@@ -400,4 +400,23 @@ def voxelize_points(points,voxel_size,volume_resolution,if_dilate=False):
         points = points[np.newaxis] + cube_dilate[...,np.newaxis,:]
         points = points.reshape(-1,3)
         
-    
+
+'''
+体素网格计算梯度
+'''
+import torch
+def compute_gradient(values:torch.Tensor, mask:torch.Tensor):
+    """
+    计算梯度
+    """
+    masked_values = values.clone()
+    masked_values[~mask] = np.nan
+    dx = torch.diff(masked_values, dim=0)
+    dx = torch.cat([dx,torch.zeros_like(dx[-1,:]).unsqueeze(0)],dim=0)
+    dy = torch.diff(masked_values, dim=1)
+    dy = torch.cat([dy,torch.zeros_like(dy[:,-1]).unsqueeze(1)],dim=1)
+    dz = torch.diff(masked_values, dim=2)
+    dz = torch.cat([dz,torch.zeros_like(dz[:,:,-1]).unsqueeze(2)],dim=2)
+    grad_length = torch.sqrt(dx**2 + dy**2 + dz**2)
+    grad_length[torch.isnan(grad_length)] = 0
+    return grad_length
