@@ -33,7 +33,7 @@ import torch.nn.functional as F
 class SLatEncoder(nn.Module):
     def __init__(self,in_dim: int):
         super(SLatEncoder, self).__init__()
-        encoder_cfg = json.load(open("/mnt/lizd/work/CG/NormalEstimation/iSDF/config/encoder_config.json")).get("model").get("SparseLatentEncoder").get("args")
+        encoder_cfg = json.load(open("config/encoder_config.json")).get("model").get("SparseLatentEncoder").get("args")
         self.input_dim = in_dim
         self.input_transform = nn.Sequential(
             lat_net.L_L_T(self.input_dim, encoder_cfg.get("in_channels")),
@@ -51,7 +51,7 @@ class GridDecoder(nn.Module):
     def __init__(self):
         super(GridDecoder, self).__init__()
     
-        ss_decoder_cfg = json.load(open("/mnt/lizd/work/CG/NormalEstimation/iSDF/config/decoder_config.json")).get("model").get("SlatVoxelDecoder").get("args")
+        ss_decoder_cfg = json.load(open("config/decoder_config.json")).get("model").get("SlatVoxelDecoder").get("args")
         
         self.ss_decoder = lat_net.SLatVoxelDecoder(**ss_decoder_cfg)
         self.activation = nn.Tanh()
@@ -67,7 +67,7 @@ class GridDecoder(nn.Module):
 class VoxelGridVAEBuilder(nn.Module):
     def __init__(self):
         super(VoxelGridVAEBuilder, self).__init__()
-        config = json.load(open("/mnt/lizd/work/CG/NormalEstimation/iSDF/config/voxelGridVAE.json")).get("model")    
+        config = json.load(open("config/voxelGridVAE.json")).get("model")    
         input_channels = config.get("input_channels")
         output_channels = config.get("output_channels")
         encoder_config = config.get("SparseLatentEncoder").get("args")
