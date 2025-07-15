@@ -25,21 +25,23 @@ basic_config = {
 } 
 
 def get_config(*args, **kwargs):
+    # database_path = "/mnt/lizd/workdata/iSDF/"
+    database_path = "/pub/data/zhuodongli/iSDF"
     config = basic_config.copy()
     if kwargs.get("dataset_name") != None:
         if kwargs.get("dataset_name") == "pcpnet":
-            config["data_path"] = f"/mnt/lizd/workdata/iSDF/pcpnet/poission_mesh/"
-            config["save_path"] = f"/mnt/lizd/workdata/iSDF/pcpnet/poission_mesh/temp/"
+            config["data_path"] = f"{database_path}/pcpnet/poission_mesh/"
+            config["save_path"] = f"{database_path}/pcpnet/poission_mesh/temp/"
         else:
             import os
-            if os.path.exists(f"/mnt/lizd/workdata/iSDF/{kwargs.get('dataset_name')}"):
-                config["data_path"] = f"/mnt/lizd/workdata/iSDF/{kwargs.get('dataset_name')}/"
-                config["save_path"] = f"/mnt/lizd/workdata/iSDF/{kwargs.get('dataset_name')}/temp/"
+            if os.path.exists(f"{database_path}/{kwargs.get('dataset_name')}"):
+                config["data_path"] = f"{database_path}/{kwargs.get('dataset_name')}/"
+                config["save_path"] = f"{database_path}/{kwargs.get('dataset_name')}/temp/"
             else:
                 raise ValueError(f"Dataset name {kwargs.get('dataset_name')} not supported")
     else:
-        config["data_path"] = "/mnt/lizd/workdata/iSDF/mesh_segment/"
-        config["save_path"] = "/mnt/lizd/workdata/iSDF/mesh_segment/temp/"
+        config["data_path"] = f"{database_path}/mesh_segment/"
+        config["save_path"] = f"{database_path}/mesh_segment/temp/"
         
     
     return config
