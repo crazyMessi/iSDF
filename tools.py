@@ -311,6 +311,12 @@ def create_uniform_grid(resolution, bbox=np.array([[-1, 1], [-1, 1], [-1, 1]])):
 #     _,idx = kdtree.query(points,k=1)
 #     return idx
 
+'''
+创建mask
+tomask: 需要mask的网格坐标
+source_points: 需要mask的点云坐标
+k: 在source_points附近的k个点会被mask
+'''
 def create_mask_by_k(tomask,source_points,k):
     mask = np.zeros(tomask.shape[0],dtype=np.bool_)
     kdtree = cKDTree(tomask)

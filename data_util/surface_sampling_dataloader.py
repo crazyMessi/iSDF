@@ -168,7 +168,9 @@ class SurfaceSamplingDataset(Dataset):
                 sampled_points, sampled_normals, vertices, faces
             )
         
-        return sampled_points, sampled_normals, vertices, faces
+        # 返回文件名
+        file_name = self.file_list[idx]
+        return sampled_points, sampled_normals, vertices, faces, file_name
 
 
     @staticmethod
@@ -180,10 +182,11 @@ class SurfaceSamplingDataset(Dataset):
         normals = [item[1] for item in batch]
         vertices = [item[2] for item in batch]
         faces = [item[3] for item in batch]
+        file_name = [item[4] for item in batch]
         
         points = torch.stack(points, dim=0)
         normals = torch.stack(normals, dim=0)
-        return points, normals, vertices, faces
+        return points, normals, vertices, faces, file_name
 
 
 class SurfaceSamplingDatasetTorch(SurfaceSamplingDataset):
@@ -196,7 +199,7 @@ class SurfaceSamplingDatasetTorch(SurfaceSamplingDataset):
         self.device = device
         
     def __getitem__(self, idx):
-        sampled_points, sampled_normals, vertices, faces = super().__getitem__(idx)
+        sampled_points, sampled_normals, vertices, faces, file_name = super().__getitem__(idx)
         
         # 转换为PyTorch张量
         torch_dtype = get_torch_dtype()
@@ -205,7 +208,7 @@ class SurfaceSamplingDatasetTorch(SurfaceSamplingDataset):
         vertices = torch.tensor(vertices, dtype=torch_dtype, device=self.device)
         faces = torch.tensor(faces, dtype=torch.long, device=self.device)
         
-        return sampled_points, sampled_normals, vertices, faces
+        return sampled_points, sampled_normals, vertices, faces, file_name
 
 
 

@@ -5,18 +5,14 @@ basic_config = {
     "num_samples": 10000,  # Number of points to sample from each mesh
     # Model general parameters
     "device": 'cuda' if torch.cuda.is_available() else 'cpu',
-    "R": 256,  # Resolution for GT SDF grid and final predicted SDF grid (R x R x R)
-    "r": 256,  # Resolution for intermediate voxel grid from predicted normals (r x r x r)
-
-    # PointNet (f1) parameters
-    "pointnet_input_channels": 3, # x,y,z for points
-    "pointnet_output_dim": 256,
+    "R": 128,  # Resolution for GT SDF grid and final predicted SDF grid (R x R x R)
+    "r": 128,  # Resolution for intermediate voxel grid from predicted normals (r x r x r)
 
     # PCA normal estimation parameters
     "pca_knn": 10, # k-nearest neighbors for PCA normal estimation
 
     # Training parameters
-    "batch_size": 2,
+    "batch_size": 1,
     "epochs": 100,
     "learning_rate": 1e-5,
     "log_interval": 1, # Print log every N batches
@@ -25,6 +21,7 @@ basic_config = {
     # Other
     "use_torch_dataloader": True, # From original train_per_pc.py
     "loss_fn": "CustomLoss",
+    "k_for_mask": 216, # 在sample point附近的1920个点会被mask
 } 
 
 def get_config(*args, **kwargs):
