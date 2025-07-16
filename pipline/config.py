@@ -1,5 +1,5 @@
 import torch
-
+import json
 basic_config = {
     # Data parameters
     "num_samples": 10000,  # Number of points to sample from each mesh
@@ -23,11 +23,13 @@ basic_config = {
     "loss_fn": "CustomLoss",
     "k_for_mask": 216, # 在sample point附近的1920个点会被mask
 } 
+local_config = json.load(open("config/local_config.json"))
 
 def get_config(*args, **kwargs):
     # database_path = "/mnt/lizd/workdata/iSDF/"
-    database_path = "/pub/data/zhuodongli/iSDF"
+    database_path = local_config.get("database_path")
     config = basic_config.copy()
+    config["experiment_output_path"] = local_config.get("experiment_output_path")
     if kwargs.get("dataset_name") != None:
         if kwargs.get("dataset_name") == "pcpnet":
             config["data_path"] = f"{database_path}/pcpnet/poission_mesh/"

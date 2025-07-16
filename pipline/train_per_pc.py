@@ -456,7 +456,7 @@ class TrainingVisualizer:
         
         # 创建主输出目录
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.output_dir = Path(f"experiment_results/{self.dataset_name}_{timestamp}")
+        self.output_dir = Path(f"{cfg.get('experiment_output_path')}/{self.dataset_name}_{timestamp}")
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
         # 创建子目录
