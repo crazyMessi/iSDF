@@ -233,220 +233,6 @@ def check_model_params(model, model_name="Model"):
     
     return has_nan, has_inf
 
-# def evaluate_model(model, dataloader, device, cfg, loss_fn, epoch=None, save_results=False):
-#     """
-#     Evaluates the model on the validation/test set using **exactly** the same
-#     data-preparation pipeline as the training loop so that no distribution
-#     shift is introduced between training and evaluation.
-#     """
-#     model.eval()
-
-#     total_loss = 0.0
-#     total_acc = 0.0
-#     total_acc_wnf = 0.0
-#     total_feats_acc = 0.0
-#     num_batches = 0
-
-#     with torch.no_grad():
-#         for batch_idx, (points, gt_normals, vertices, faces,file_name) in enumerate(dataloader):
-#             # Ensure data is on the correct device
-#             points = points.to(device)         # (B, N_points, 3)
-#             B = points.size(0)
-
-#             # === Use EXACTLY the same data processing pipeline as training ===
-            
-#             # 1. Estimate normals with PCA (same as training)
-#             pred_normals = estimate_normals_pca(points, k=cfg["pca_knn"]) # (B, N_points, 3)
-
-#             # 2. Create uniform grid and initialize tensors (same as training)
-#             i_resolu = cfg["r"]
-#             o_resolu = cfg["R"]
-#             voxel_center,grid_shape = tools.create_uniform_grid(i_resolu,bbox=np.array([[-1,1],[-1,1],[-1,1]]))
-#             feat_shape = [B] + list(grid_shape)
-#             gt_wnf = torch.zeros(feat_shape,device=device)
-#             pred_wnf = torch.zeros(feat_shape,device=device)
-#             gt_sdf = torch.zeros(feat_shape,device=device)
-#             gt_udf = torch.zeros(feat_shape,device=device)
-#             pred_udf = torch.zeros(feat_shape,device=device)
-#             masks = torch.zeros(feat_shape,device=device)
-            
-#             # 3. Process each batch item (same as training)
-#             import cal_wnf
-#             sdf_field = SDFField(i_resolu)
-#             for i in range(B):
-#                 mask = tools.create_mask_by_k(voxel_center,points[i].cpu().numpy(),k=60)    
-#                 query_points_i = voxel_center[mask]
-#                 mask_cuda = torch.from_numpy(mask).to(device).reshape(grid_shape)
-#                 masks[i] = mask_cuda
-#                 mask = mask.reshape(grid_shape)
-#                 query_points_i = torch.from_numpy(query_points_i).to(device)
-#                 pred_normals_i = pred_normals[i]
-                
-#                 # 计算wnf (same as training)
-#                 wnf_i = cal_wnf.compute_winding_number_torch_api(points[i],pred_normals[i],query_points_i,epsilon=1e-8,batch_size=10000)
-#                 gt_wnf_i = cal_wnf.compute_winding_number_torch_api(points[i],gt_normals[i],query_points_i,epsilon=1e-8,batch_size=10000)
-#                 pred_wnf_grad_i = cal_wnf.compute_winding_number_torch_api(points[i],pred_normals[i],query_points_i,epsilon=1e-8,batch_size=10000)
-                
-#                 pred_wnf[i][mask_cuda] = wnf_i
-#                 gt_wnf[i][mask_cuda] = gt_wnf_i
-#                 pred_wnf_grad[i][mask_cuda] = pred_wnf_grad_i
-#                 # 计算sdf (same as training)
-#                 mesh_sdf = MeshSDF(vertices[i].cpu().numpy(), faces[i].cpu().numpy())
-#                 sdf_values = mesh_sdf.query(query_points_i.cpu().numpy())
-#                 gt_sdf[i][mask_cuda] = torch.from_numpy(sdf_values).to(device,dtype=torch.float32)
-                
-#                 # 计算udf (same as training)
-#                 gt_udf[i][mask_cuda] = torch.abs(gt_sdf[i][mask_cuda])
-#                 pred_udf[i][mask_cuda] = torch.abs(sdf_field.compute_sdf(points[i],pred_normals[i],query_points_i))
-                
-#             # 4. Gather sparse indices and values (same as training)       
-#             indices = torch.nonzero(masks).int()
-#             gt_sdf_val = gt_sdf[indices[:,0],indices[:,1],indices[:,2],indices[:,3]]
-#             gt_udf_val = gt_udf[indices[:,0],indices[:,1],indices[:,2],indices[:,3]]
-#             pred_udf_val = pred_udf[indices[:,0],indices[:,1],indices[:,2],indices[:,3]]
-#             wnf_val = pred_wnf[indices[:,0],indices[:,1],indices[:,2],indices[:,3]]
-#             gt_wnf_val = gt_wnf[indices[:,0],indices[:,1],indices[:,2],indices[:,3]]
-#             pred_wnf_grad_val = pred_wnf_grad[indices[:,0],indices[:,1],indices[:,2],indices[:,3]]
-#             wnf_val = torch.tanh(wnf_val)
-#             gt_wnf_val = torch.tanh(gt_wnf_val)
-#             pred_wnf_grad_val = torch.tanh(pred_wnf_grad_val)
-            
-#             # 5. Create features (same as training)
-#             feats1 = wnf_val
-#             feats1 = torch.tanh(feats1)
-#             feats_acc = (feats1>0.0).squeeze().eq(gt_wnf_val>0.0).float().mean()
-#             feats12 = torch.cat([feats1.unsqueeze(1),pred_udf_val.unsqueeze(1)],dim=1)
-            
-#             # 6. Forward pass through model (same as training)
-#             # sp_feats = sp.SparseTensor(feats12, indices)
-#             sp_feats = sp.SparseTensor(pred_wnf_grad_val.squeeze().unsqueeze(1),indices)
-#             sp_feats = model(sp_feats)
-#             pred_val = sp_feats.feats.squeeze()
-            
-#             # 7. Calculate metrics (same as training)
-#             loss = loss_fn(pred_val, gt_wnf_val)
-#             acc = (pred_val>0.0).eq(gt_wnf_val>0.0).float().mean()
-#             loss_gt_wnf = loss_fn(gt_wnf_val,gt_sdf_val)
-#             acc_wnf = (gt_sdf_val>0.0).eq(gt_wnf_val>0.0).float().mean()
-
-#             total_loss += loss.item()
-#             total_acc += acc.item()
-#             total_acc_wnf += acc_wnf.item()
-#             total_feats_acc += feats_acc.item()
-#             num_batches += 1
-            
-#             # 8. Save validation results if requested
-#             if save_results and epoch is not None:
-#                 val_save_dir = f"val_results/epoch_{epoch}"
-#                 os.makedirs(val_save_dir, exist_ok=True)
-                
-#                 # For each item in the batch
-#                 for i in range(B):
-#                     batch_save_dir = f"{val_save_dir}/batch_{batch_idx}_item_{i}"
-#                     os.makedirs(batch_save_dir, exist_ok=True)
-                    
-#                     # Create full prediction SDF grid
-#                     pred_sdf = torch.zeros_like(gt_sdf)
-#                     pred_sdf[indices[:,0],indices[:,1],indices[:,2],indices[:,3]] = pred_val
-                    
-#                     # Save meshes
-#                     try:
-#                         # Extract and save GT SDF surface
-#                         tools.extract_surface_from_scalar_field(
-#                             gt_sdf[i].squeeze().cpu().numpy(), 
-#                             level=0, 
-#                             resolution=cfg["r"], 
-#                             save_path=f"{batch_save_dir}/gt_sdf.ply",
-#                             mask=masks[i].cpu().numpy()
-#                         )
-                        
-#                         # Extract and save predicted SDF surface
-#                         tools.extract_surface_from_scalar_field(
-#                             pred_sdf[i].squeeze().cpu().detach().numpy(), 
-#                             level=0, 
-#                             resolution=cfg["r"], 
-#                             save_path=f"{batch_save_dir}/pred_sdf.ply",
-#                             mask=masks[i].cpu().numpy()
-#                         )
-                        
-#                         # Extract and save GT WNF surface
-#                         tools.extract_surface_from_scalar_field(
-#                             gt_wnf[i].squeeze().cpu().numpy(), 
-#                             level=0, 
-#                             resolution=cfg["r"], 
-#                             save_path=f"{batch_save_dir}/gt_wnf.ply",
-#                             mask=masks[i].cpu().numpy()
-#                         )
-                        
-#                         # Save original GT mesh
-#                         import open3d as o3d
-#                         o3d.io.write_triangle_mesh(
-#                             f"{batch_save_dir}/gt_mesh.ply",
-#                             o3d.geometry.TriangleMesh(
-#                                 o3d.utility.Vector3dVector(vertices[i].cpu().numpy()),
-#                                 o3d.utility.Vector3iVector(faces[i].cpu().numpy())
-#                             )
-#                         )
-                        
-#                         # Save point cloud with normals
-#                         pcd = o3d.geometry.PointCloud()
-#                         pcd.points = o3d.utility.Vector3dVector(points[i].cpu().numpy())
-#                         pcd.normals = o3d.utility.Vector3dVector(pred_normals[i].cpu().numpy())
-#                         o3d.io.write_point_cloud(f"{batch_save_dir}/input_points_with_normals.ply", pcd)
-                        
-#                     except Exception as e:
-#                         print(f"Warning: Could not save mesh for validation batch {batch_idx}, item {i}: {e}")
-                    
-#                     # Save scalar fields as numpy arrays
-#                     try:
-#                         np.save(f"{batch_save_dir}/gt_sdf.npy", gt_sdf[i].cpu().numpy())
-#                         np.save(f"{batch_save_dir}/pred_sdf.npy", pred_sdf[i].cpu().detach().numpy())
-#                         np.save(f"{batch_save_dir}/gt_wnf.npy", gt_wnf[i].cpu().numpy())
-#                         np.save(f"{batch_save_dir}/pred_wnf.npy", pred_wnf[i].cpu().numpy())
-#                         np.save(f"{batch_save_dir}/gt_udf.npy", gt_udf[i].cpu().numpy())
-#                         np.save(f"{batch_save_dir}/pred_udf.npy", pred_udf[i].cpu().numpy())
-#                         np.save(f"{batch_save_dir}/mask.npy", masks[i].cpu().numpy())
-                        
-#                         # Save input data
-#                         np.save(f"{batch_save_dir}/input_points.npy", points[i].cpu().numpy())
-#                         np.save(f"{batch_save_dir}/pred_normals.npy", pred_normals[i].cpu().numpy())
-#                         np.save(f"{batch_save_dir}/gt_normals.npy", gt_normals[i].cpu().numpy())
-#                         np.save(f"{batch_save_dir}/vertices.npy", vertices[i].cpu().numpy())
-#                         np.save(f"{batch_save_dir}/faces.npy", faces[i].cpu().numpy())
-                        
-#                     except Exception as e:
-#                         print(f"Warning: Could not save numpy arrays for validation batch {batch_idx}, item {i}: {e}")
-                    
-#                     # Save metrics for this sample
-#                     try:
-#                         metrics = {
-#                             'loss': loss.item(),
-#                             'accuracy': acc.item(),
-#                             'accuracy_wnf': acc_wnf.item(),
-#                             'feats_accuracy': feats_acc.item(),
-#                             'loss_gt_wnf': loss_gt_wnf.item(),
-#                             'num_valid_voxels': masks[i].sum().item(),
-#                             'total_voxels': masks[i].numel()
-#                         }
-                        
-#                         with open(f"{batch_save_dir}/metrics.json", 'w') as f:
-#                             json.dump(metrics, f, indent=2)
-                            
-#                     except Exception as e:
-#                         print(f"Warning: Could not save metrics for validation batch {batch_idx}, item {i}: {e}")
-                
-#                 # Only save first few batches to avoid too much storage
-#                 if batch_idx >= 2:  # Save first 3 batches
-#                     break
-
-#     # 9. Aggregate statistics
-#     avg_loss = total_loss / max(num_batches, 1)
-#     avg_acc = total_acc / max(num_batches, 1)
-#     avg_acc_wnf = total_acc_wnf / max(num_batches, 1)
-#     avg_feats_acc = total_feats_acc / max(num_batches, 1)
-
-#     return avg_loss, avg_acc, avg_acc_wnf, avg_feats_acc
-
 class TrainingVisualizer:
     """统一管理训练过程中的可视化和保存"""
     
@@ -608,13 +394,13 @@ class TrainingVisualizer:
                         o3d.utility.Vector3iVector(faces[sample_idx].cpu().numpy())
                     )
                 )
-                
+                        
                 # 带法向量的点云
                 pcd = o3d.geometry.PointCloud()
                 pcd.points = o3d.utility.Vector3dVector(points[sample_idx].cpu().numpy())
                 pcd.normals = o3d.utility.Vector3dVector(pred_normals[sample_idx].cpu().numpy())
                 o3d.io.write_point_cloud(str(mesh_dir / "input_points_normals.ply"), pcd)
-                
+                        
             except Exception as e:
                 print(f"Warning: Could not save meshes for {phase} epoch {epoch}, {dir_name}, sample {sample_idx}: {e}")
             
@@ -628,7 +414,7 @@ class TrainingVisualizer:
                 np.save(fields_dir / "gt_wnf.npy", gt_wnf[sample_idx].cpu().numpy())
                 np.save(fields_dir / "pred_wnf_grad.npy", pred_wnf_grad[sample_idx].cpu().numpy())
                 np.save(fields_dir / "mask.npy", masks[sample_idx].cpu().numpy())
-                
+                        
             except Exception as e:
                 print(f"Warning: Could not save fields for {phase} epoch {epoch}, {dir_name}, sample {sample_idx}: {e}")
             
@@ -791,7 +577,7 @@ class TrainingVisualizer:
             plt.tight_layout()
             plt.savefig(images_dir / 'mask_overview.png', dpi=150, bbox_inches='tight')
             plt.close()
-            
+                            
         except Exception as e:
             print(f"Warning: Could not save mask overview: {e}")
     
@@ -1021,6 +807,156 @@ Generated on: {datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
         print(f"✅ Training visualization complete. Results saved to: {self.output_dir}")
         return final_report
 
+def validate_model(model, val_dataloader, device, cfg, loss_fn, visualizer, epoch):
+    """
+    在每个epoch后验证模型性能，使用与训练完全相同的数据处理流程
+    并通过visualizer保存验证结果
+    """
+    model.eval()
+    
+    total_loss = 0.0
+    total_acc = 0.0
+    total_acc_wnf = 0.0
+    total_feats_acc = 0.0
+    num_batches = 0
+    
+    print(f"\n=== Starting Validation for Epoch {epoch+1} ===")
+    
+    with torch.no_grad():
+        for batch_idx, (points, gt_normals, vertices, faces, file_name) in enumerate(val_dataloader):
+            # 确保数据在正确的设备上
+            points = points.to(device)         # (B, N_points, 3)
+            
+            # === 使用与训练完全相同的数据处理流程 ===
+            
+            # 1. 使用PCA估计法向量（与训练相同）
+            pred_normals = estimate_normals_pca(points, k=cfg["pca_knn"]) # (B, N_points, 3)
+            
+            # 2. 创建均匀网格并初始化张量（与训练相同）
+            i_resolu = cfg["r"]
+            o_resolu = cfg["R"]
+            voxel_center,grid_shape = tools.create_uniform_grid(i_resolu,bbox=np.array([[-1,1],[-1,1],[-1,1]]))
+            feat_shape = [B] + list(grid_shape)
+            gt_wnf = torch.zeros(feat_shape,device=device)
+            pred_wnf = torch.zeros(feat_shape,device=device)
+            gt_sdf = torch.zeros(feat_shape,device=device)
+            gt_udf = torch.zeros(feat_shape,device=device)
+            pred_udf = torch.zeros(feat_shape,device=device)
+            pred_wnf_grad = torch.zeros(feat_shape,device=device)
+            masks = torch.zeros(feat_shape,device=device)
+            
+            # 3. 处理每个批次项（与训练相同）
+            import cal_wnf
+            sdf_field = SDFField(i_resolu)
+            for i in range(B):
+                mask = tools.create_mask_by_k(voxel_center,points[i].cpu().numpy(),k=cfg["k_for_mask"])    
+                t  = cc3d.connected_components(mask.reshape(grid_shape))
+                if t.max() > 1:
+                    print("Warning: connected components num of mask = {}".format(t.max()))
+                query_points_i = voxel_center[mask]
+                mask_cuda = torch.from_numpy(mask).to(device).reshape(grid_shape)
+                masks[i] = mask_cuda
+                mask = mask.reshape(grid_shape)
+                query_points_i = torch.from_numpy(query_points_i).to(device)
+                pred_normals_i = pred_normals[i]
+                
+                # 计算wnf（与训练相同）
+                wnf_i = cal_wnf.compute_winding_number_torch_api(points[i],pred_normals[i],query_points_i,epsilon=1e-8,batch_size=10000)
+                gt_wnf_i = cal_wnf.compute_winding_number_torch_api(points[i],gt_normals[i],query_points_i,epsilon=1e-8,batch_size=10000)
+                pred_wnf[i][mask_cuda] = wnf_i
+                gt_wnf[i][mask_cuda] = gt_wnf_i
+                wnf_grad = tools.compute_gradient(pred_wnf[i],mask_cuda)
+                pred_wnf_grad[i][mask_cuda] = wnf_grad[mask_cuda]
+                
+                # 计算sdf（与训练相同）
+                mesh_sdf = MeshSDF(vertices[i].cpu().numpy(), faces[i].cpu().numpy())
+                sdf_values = mesh_sdf.query(query_points_i.cpu().numpy())
+                gt_sdf[i][mask_cuda] = torch.from_numpy(sdf_values).to(device,dtype=torch.float32)
+                
+                # 计算udf（与训练相同）
+                gt_udf[i][mask_cuda] = torch.abs(gt_sdf[i][mask_cuda])
+                pred_udf[i][mask_cuda] = torch.abs(sdf_field.compute_sdf(points[i],pred_normals[i],query_points_i))
+                
+            # 4. 收集稀疏索引和值（与训练相同）       
+            indices = torch.nonzero(masks).int()
+            gt_sdf_val = gt_sdf[indices[:,0],indices[:,1],indices[:,2],indices[:,3]]
+            gt_udf_val = gt_udf[indices[:,0],indices[:,1],indices[:,2],indices[:,3]]
+            pred_udf_val = pred_udf[indices[:,0],indices[:,1],indices[:,2],indices[:,3]]
+            wnf_val = pred_wnf[indices[:,0],indices[:,1],indices[:,2],indices[:,3]]
+            pred_wnf_grad_val = pred_wnf_grad[indices[:,0],indices[:,1],indices[:,2],indices[:,3]]
+            gt_wnf_val = gt_wnf[indices[:,0],indices[:,1],indices[:,2],indices[:,3]]
+            wnf_val = torch.tanh(wnf_val)
+            gt_wnf_val = torch.tanh(gt_wnf_val)
+            pred_wnf_grad_val = torch.tanh(pred_wnf_grad_val)
+            
+            # 5. 创建特征（与训练相同）
+            feats1 = wnf_val
+            feats1 = torch.tanh(feats1)
+            feats_acc = (feats1>0.0).squeeze().eq(gt_wnf_val>0.0).float().mean()
+            feats12 = torch.cat([feats1.unsqueeze(1),pred_wnf_grad_val.unsqueeze(1)],dim=1)
+            
+            # 6. 通过模型前向传播（与训练相同）
+            pred_wnf_grad_val_input = pred_wnf_grad_val.squeeze().unsqueeze(1)
+            sp_feats = sp.SparseTensor(pred_wnf_grad_val_input,indices)
+            sp_feats = model(sp_feats)
+            pred_val = sp_feats.feats.squeeze()
+            
+            # 7. 计算指标（与训练相同）
+            loss = loss_fn(pred_val, gt_wnf_val)
+            acc = (pred_val>0.0).eq(gt_wnf_val>0.0).float().mean()
+            loss_gt_wnf = loss_fn(gt_wnf_val,gt_sdf_val)
+            acc_wnf = (gt_sdf_val>0.0).eq(gt_wnf_val>0.0).float().mean()
+
+            total_loss += loss.item()
+            total_acc += acc.item()
+            total_acc_wnf += acc_wnf.item()
+            total_feats_acc += feats_acc.item()
+            num_batches += 1
+            
+            # 8. 保存验证结果（使用visualizer）
+            # 创建完整的预测SDF网格
+            pred_sdf = torch.zeros_like(gt_sdf)
+            pred_sdf[indices[:,0],indices[:,1],indices[:,2],indices[:,3]] = pred_val
+            
+            # 每隔一定间隔或最后几个批次保存详细结果
+            save_this_batch = (
+                batch_idx % cfg.get("val_save_interval", 20) == 0 or  # 每隔一定间隔
+                batch_idx < 3 or  # 前3个批次
+                batch_idx >= len(val_dataloader) - 3  # 最后3个批次
+            )
+            
+            if save_this_batch:
+                # 使用visualizer保存验证批次结果（类似训练）
+                visualizer._save_detailed_batch_results(
+                    epoch, batch_idx, "validation",
+                    gt_sdf, pred_sdf, gt_wnf, pred_wnf_grad, masks,
+                    vertices, faces, points, pred_normals, gt_normals,
+                    global_step=epoch * 1000 + batch_idx,  # 简单的全局步数
+                    file_names=file_name
+                )
+            
+            # 进度输出
+            print(f"  Val Batch {batch_idx+1}/{len(val_dataloader)}: "
+                  f"Loss={loss.item():.4f}, Acc={acc.item():.4f}, "
+                  f"AccWNF={acc_wnf.item():.4f}, FeatsAcc={feats_acc.item():.4f}")
+            
+            # 为了节省时间，可以选择只验证部分批次
+            if batch_idx >= cfg.get("max_val_batches", float('inf')) - 1:
+                break
+
+    # 9. 聚合统计
+    avg_loss = total_loss / max(num_batches, 1)
+    avg_acc = total_acc / max(num_batches, 1)
+    avg_acc_wnf = total_acc_wnf / max(num_batches, 1)
+    avg_feats_acc = total_feats_acc / max(num_batches, 1)
+
+    print(f"=== Validation Complete - Epoch {epoch+1} ===")
+    print(f"Avg Loss: {avg_loss:.6f}, Avg Acc: {avg_acc:.6f}")
+    print(f"Avg AccWNF: {avg_acc_wnf:.6f}, Avg FeatsAcc: {avg_feats_acc:.6f}")
+    print(f"Processed {num_batches} validation batches\n")
+
+    return avg_loss, avg_acc, avg_acc_wnf, avg_feats_acc
+
 if __name__ == "__main__":
     # Parse command-line arguments
     parser = argparse.ArgumentParser(description='Train a neural network for SDF estimation')
@@ -1242,26 +1178,33 @@ if __name__ == "__main__":
                 
                 print(f"Epoch {epoch+1}/{cfg['epochs']}, Batch {batch_idx+1}/{len(train_dataloader)}, Loss: {loss.item():.6f}, Acc: {acc.item():.6f}, Acc_wnf: {acc_wnf.item():.6f}, Loss_gt_wnf: {loss_gt_wnf.item():.6f}, Feats_acc: {feats_acc.item():.6f}")
 
-        # Validation phase
-        # val_loss, val_acc, val_acc_wnf, val_feats_acc = evaluate_model(
-        #     vae, val_dataloader, device, cfg, loss_fn, epoch, 
-        #     save_results=args.save_val_results and (epoch % 5 == 0 or epoch == cfg["epochs"] - 1)
-        # )
+        # Validation phase - 在每个epoch后运行验证
+        print(f"\n🔍 Running validation for epoch {epoch+1}...")
+        val_loss, val_acc, val_acc_wnf, val_feats_acc = validate_model(
+            vae, val_dataloader, device, cfg, loss_fn, visualizer, epoch
+        )
         
         # Use visualizer to save validation results
-        # visualizer.save_validation_epoch_results(epoch, val_loss, val_acc, val_acc_wnf, val_feats_acc)
+        visualizer.save_validation_epoch_results(epoch, val_loss, val_acc, val_acc_wnf, val_feats_acc)
         
-        # print(f"\nValidation Results - Epoch {epoch+1}:")
-        # print(f"Loss: {val_loss:.6f}, Acc: {val_acc:.6f}")
-        # print(f"Acc_wnf: {val_acc_wnf:.6f}, Feats_acc: {val_feats_acc:.6f}")
+        print(f"\n📊 Validation Results - Epoch {epoch+1}:")
+        print(f"Loss: {val_loss:.6f}, Acc: {val_acc:.6f}")
+        print(f"Acc_wnf: {val_acc_wnf:.6f}, Feats_acc: {val_feats_acc:.6f}")
         
-        # # Save checkpoints using visualizer
-        # is_best = val_loss < best_val_loss
-        # if is_best:
-        #     best_val_loss = val_loss
-        #     best_val_acc = val_acc
+        # Save checkpoints using visualizer
+        is_best = val_loss < best_val_loss
+        if is_best:
+            best_val_loss = val_loss
+            best_val_acc = val_acc
         
-        # visualizer.save_checkpoint(epoch, vae, optimizer, val_loss, val_acc, is_best=is_best)
+        visualizer.save_checkpoint(epoch, vae, optimizer, val_loss, val_acc, is_best=is_best)
+
+        # 可选：早停机制
+        if cfg.get("early_stopping", False):
+            patience = cfg.get("early_stopping_patience", 10)
+            if epoch > patience and val_loss > best_val_loss * 1.1:  # 如果验证损失增加超过10%
+                print(f"Early stopping triggered at epoch {epoch+1}")
+                break
 
     print("Training finished.")
     

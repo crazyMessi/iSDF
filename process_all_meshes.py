@@ -21,13 +21,13 @@ try:
     import trimesh
     # 尝试导入独立模块
     try:
-        from mesh_partition_standalone import process_single_mesh
+        from mesh_partition_module import process_single_mesh
     except ImportError as e:
         print(f"错误: 导入失败: {e}")
-        print("请确保已安装trimesh和已编译mesh_partition_standalone")
+        print("请确保已安装trimesh和已编译mesh_partition_module")
         print("可以使用以下命令安装:")
         print("  pip install trimesh")
-        print("  python setup_standalone.py build_ext --inplace")
+        print("  python setup_module.py build_ext --inplace")
         sys.exit(1)
                 
 except ImportError as e:
@@ -440,14 +440,21 @@ def process_directory(input_dir, output_dir, target_points_per_leaf,
     
     print(f"\n处理完成! 成功: {success_count}/{len(files)}")
 
+import json
 def main():
+    config = json.load(open("config/local_config.json"))
+    dafault_input_dir = config.get("origin_mesh_path")
+    dataset_name = os.path.basename(dafault_input_dir)
+    dafault_output_dir = config.get("database_path") + dataset_name + "_mesh_segment_" + str(config.get("leaf_size"))
+    
+    
     parser = argparse.ArgumentParser(description='批量处理PLY文件并执行网格分区')
-    parser.add_argument('--input-dir', type=str, default=r'D:\WorkData\iSDF\origin_mesh',
-                        help='输入PLY文件目录 (默认: D:\\WorkData\\iSDF\\origin_mesh)')
-    parser.add_argument('--output-dir', type=str, default=r'D:\WorkData\iSDF\mesh_segment',
-                        help='输出分区网格目录 (默认: D:\\WorkData\\iSDF\\mesh_segment)')
-    parser.add_argument('--leaf-size', type=int, default=2000,
-                        help='每个叶子节点的目标点数 (默认: 2000)')
+    parser.add_argument('--input-dir', type=str, default=dafault_input_dir,
+                        help='输入PLY文件目录 (默认: ' + dafault_input_dir + ')')
+    parser.add_argument('--output-dir', type=str, default=dafault_output_dir,
+                        help='输出分区网格目录 (默认: ' + dafault_output_dir + ')')
+    parser.add_argument('--leaf-size', type=int, default=config.get("leaf_size"),
+                        help='每个叶子节点的目标点数 (默认: 10000)。当一块曲面内的点数小于此值时，将不再进行分区')
     parser.add_argument('--pattern', type=str, default="*.ply",
                         help='文件匹配模式 (默认: *.ply)')
     parser.add_argument('--no-individual-regions', action='store_true',
