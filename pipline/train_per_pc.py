@@ -4,6 +4,7 @@ import torch.optim as optim
 import os
 import numpy as np
 import argparse
+import shutil
 os.sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 import json
 from data_util.surface_sampling_dataloader import get_surface_sampling_dataloader
@@ -957,6 +958,40 @@ def validate_model(model, val_dataloader, device, cfg, loss_fn, visualizer, epoc
 
     return avg_loss, avg_acc, avg_acc_wnf, avg_feats_acc
 
+def load_checkpoint(checkpoint_path, model, optimizer, device):
+    """
+    从checkpoint文件加载模型状态、优化器状态和训练信息
+    """
+    if not os.path.exists(checkpoint_path):
+        raise FileNotFoundError(f"Checkpoint file not found: {checkpoint_path}")
+    
+    print(f"📂 Loading checkpoint from: {checkpoint_path}")
+    
+    # 加载checkpoint
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    
+    # 加载模型状态
+    model.load_state_dict(checkpoint['model_state_dict'])
+    print(f"✅ Model state loaded from epoch {checkpoint['epoch']}")
+    
+    # 加载优化器状态
+    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    print(f"✅ Optimizer state loaded")
+    
+    # 获取训练信息
+    start_epoch = checkpoint['epoch'] + 1  # 从下一个epoch开始
+    best_val_loss = checkpoint.get('val_loss', float('inf'))
+    best_val_acc = checkpoint.get('val_acc', 0.0)
+    
+    # 检查配置兼容性
+    saved_config = checkpoint.get('config', {})
+    print(f"💾 Checkpoint saved at epoch {checkpoint['epoch']}")
+    print(f"📊 Best validation loss so far: {best_val_loss:.6f}")
+    print(f"📊 Best validation accuracy so far: {best_val_acc:.6f}")
+    
+    return start_epoch, best_val_loss, best_val_acc, saved_config
+
+
 if __name__ == "__main__":
     # Parse command-line arguments
     parser = argparse.ArgumentParser(description='Train a neural network for SDF estimation')
@@ -964,6 +999,8 @@ if __name__ == "__main__":
     parser.add_argument('--dataset_name', type=str, default=None, help='Dataset name')
     parser.add_argument('--val_split', type=float, default=0.1, help='Validation set split ratio')
     parser.add_argument('--save_val_results', action='store_true', help='Save validation results (meshes, grids, etc.)')
+    parser.add_argument('--checkpoint_path', type=str, default=None, 
+                       help='Path to checkpoint file to resume training from')
     
     args = parser.parse_args()
 
@@ -1014,9 +1051,44 @@ if __name__ == "__main__":
     else:
         raise ValueError(f"Unknown loss function: {cfg['loss_fn']}")
     
+    # Initialize training variables
+    start_epoch = 0
+    best_val_loss = float('inf')
+    best_val_acc = 0.0
+    
+    # Load checkpoint if provided
+    if args.checkpoint_path is not None:
+        try:
+            start_epoch, best_val_loss, best_val_acc, saved_config = load_checkpoint(
+                args.checkpoint_path, vae, optimizer, device
+            )
+            
+            # 可选：检查配置兼容性
+            important_keys = ['r', 'R', 'learning_rate', 'pca_knn']
+            for key in important_keys:
+                if key in saved_config and saved_config[key] != cfg.get(key):
+                    print(f"⚠️  Warning: Config mismatch for '{key}': "
+                          f"checkpoint={saved_config[key]}, current={cfg.get(key)}")
+            
+        except Exception as e:
+            print(f"❌ Failed to load checkpoint: {e}")
+            print("📤 Starting training from scratch...")
+            start_epoch = 0
+            best_val_loss = float('inf')
+            best_val_acc = 0.0
+    else:
+        print("🚀 Starting training from scratch...")
+    
     # Initialize Training Visualizer
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_dir = f"runs/train_{args.dataset_name}_{timestamp}" if args.dataset_name else f"runs/train_{timestamp}"
+    if args.checkpoint_path:
+        # 如果从checkpoint恢复，在日志目录名中标明
+        checkpoint_name = Path(args.checkpoint_path).stem
+        log_dir = f"runs/resume_{checkpoint_name}_{timestamp}"
+        if args.dataset_name:
+            log_dir = f"runs/resume_{args.dataset_name}_{checkpoint_name}_{timestamp}"
+    else:
+        log_dir = f"runs/train_{args.dataset_name}_{timestamp}" if args.dataset_name else f"runs/train_{timestamp}"
     
     # Log hyperparameters to config
     hparams = {
@@ -1028,7 +1100,9 @@ if __name__ == "__main__":
         'pca_knn': cfg["pca_knn"],
         'num_samples': cfg["num_samples"],
         'val_split': args.val_split,
-        'device': str(device)
+        'device': str(device),
+        'resumed_from_checkpoint': args.checkpoint_path is not None,
+        'start_epoch': start_epoch
     }
     
     # Initialize visualizer
@@ -1036,13 +1110,15 @@ if __name__ == "__main__":
     
     # Training Loop
     pointcloud_voxel_resolution = cfg["r"]
-    best_val_loss = float('inf')
-    best_val_acc = 0.0
     
     # Add model architecture to tensorboard (will be done on first forward pass)
     model_logged = False
     
-    for epoch in range(cfg["epochs"]):
+    print(f"🏁 Starting training from epoch {start_epoch+1} to {cfg['epochs']}")
+    print(f"📊 Current best validation loss: {best_val_loss:.6f}")
+    print(f"📊 Current best validation accuracy: {best_val_acc:.6f}")
+    
+    for epoch in range(start_epoch, cfg["epochs"]):
         # Training phase
         vae.train()
         
@@ -1211,10 +1287,33 @@ if __name__ == "__main__":
     # Close visualizer and generate final report
     final_report = visualizer.close()
     
+    # Rename output directory with _finished suffix
+    try:
+        original_output_dir = visualizer.output_dir
+        finished_output_dir = Path(str(original_output_dir) + "_finished")
+        
+        # 如果目标目录已存在，先删除
+        if finished_output_dir.exists():
+            shutil.rmtree(finished_output_dir)
+            print(f"🗑️  Removed existing directory: {finished_output_dir}")
+        
+        # 重命名目录
+        shutil.move(str(original_output_dir), str(finished_output_dir))
+        print(f"✅ Successfully renamed output directory:")
+        print(f"   From: {original_output_dir}")
+        print(f"   To:   {finished_output_dir}")
+        
+        # 更新final_report中的路径
+        final_report['experiment_info']['output_dir'] = str(finished_output_dir)
+        
+    except Exception as e:
+        print(f"⚠️  Warning: Failed to rename output directory: {e}")
+        print(f"📁 Original output directory remains at: {visualizer.output_dir}")
+    
     print(f"🎉 Training completed successfully!")
     print(f"📊 Best validation loss: {final_report['best_performance']['best_val_loss']:.6f}")
     print(f"📊 Best validation accuracy: {final_report['best_performance']['best_val_accuracy']:.6f}")
-    print(f"📁 Results saved to: {visualizer.output_dir}")
+    print(f"📁 Results saved to: {finished_output_dir if 'finished_output_dir' in locals() else visualizer.output_dir}")
 
 
 
