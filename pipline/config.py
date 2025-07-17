@@ -13,7 +13,7 @@ basic_config = {
 
     # Training parameters
     "batch_size": 1,
-    "epochs": 100,
+    "epochs": 400,
     "learning_rate": 1e-5,
     "log_interval": 1, # Print log every N batches
     "save_checkpoint_interval": 10, # Save checkpoint every N epochs
