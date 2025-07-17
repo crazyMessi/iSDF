@@ -297,7 +297,7 @@ class TrainingVisualizer:
         self.writer.add_scalar('Train/GradNorm_Decoder', grad_norm_decoder, global_step)
         
         # 每隔一定间隔保存详细结果
-        if batch_idx % self.cfg.get("save_detailed_interval", 50) == 0:
+        if batch_idx % self.cfg.get("save_detailed_interval") == 0:
             self._save_detailed_batch_results(
                 epoch, batch_idx, "train", gt_sdf, pred_sdf, gt_wnf, pred_wnf_grad, 
                 masks, vertices, faces, points, pred_normals, gt_normals, global_step, file_names
