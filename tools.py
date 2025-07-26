@@ -426,3 +426,14 @@ def compute_gradient(values:torch.Tensor, mask:torch.Tensor):
     grad_length = torch.sqrt(dx**2 + dy**2 + dz**2)
     grad_length[torch.isnan(grad_length)] = 0
     return grad_length
+
+def cal_normal_acc(gt_normal:np.array, pred_normal:np.array) -> float:
+    """
+    gt_normal: (N, 3) array - ground truth 法向量
+    pred_normal: (N, 3) array - 预测法向量
+    """
+    dot_product = np.sum(gt_normal * pred_normal, axis=1)
+    if_inv = dot_product < 0
+    iif_inv = dot_product > 0
+    acc = max(np.mean(if_inv), np.mean(iif_inv))
+    return acc

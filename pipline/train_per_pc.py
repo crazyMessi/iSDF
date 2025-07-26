@@ -894,11 +894,12 @@ def validate_model(model, val_dataloader, device, cfg, loss_fn, visualizer, epoc
             feats1 = wnf_val
             feats1 = torch.tanh(feats1)
             feats_acc = (feats1>0.0).squeeze().eq(gt_wnf_val>0.0).float().mean()
-            feats12 = torch.cat([feats1.unsqueeze(1),pred_wnf_grad_val.unsqueeze(1)],dim=1)
+            
+            feats12 = torch.cat([pred_udf_val.unsqueeze(1),pred_wnf_grad_val.unsqueeze(1)],dim=1)
             
             # 6. 通过模型前向传播（与训练相同）
             pred_wnf_grad_val_input = pred_wnf_grad_val.squeeze().unsqueeze(1)
-            sp_feats = sp.SparseTensor(pred_wnf_grad_val_input,indices)
+            sp_feats = sp.SparseTensor(feats12,indices)
             sp_feats = model(sp_feats)
             pred_val = sp_feats.feats.squeeze()
             
@@ -1197,11 +1198,10 @@ if __name__ == "__main__":
             feats1 = wnf_val
             feats1 = torch.tanh(feats1)
             feats_acc = (feats1>0.0).squeeze().eq(gt_wnf_val>0.0).float().mean()
-            # feats12 = torch.cat([feats1.unsqueeze(1),pred_udf_val.unsqueeze(1)],dim=1)
-            feats12 = torch.cat([feats1.unsqueeze(1),pred_wnf_grad_val.unsqueeze(1)],dim=1)
-            # sp_feats = sp.SparseTensor(feats12, indices)
-            pred_wnf_grad_val = pred_wnf_grad_val.squeeze().unsqueeze(1)
-            sp_feats = sp.SparseTensor(pred_wnf_grad_val,indices)
+            feats12 = torch.cat([pred_wnf_grad_val.unsqueeze(1),pred_udf_val.unsqueeze(1)],dim=1)
+            # feats12 = torch.cat([feats1.unsqueeze(1),pred_wnf_grad_val.unsqueeze(1)],dim=1)
+            sp_feats = sp.SparseTensor(feats12, indices)
+            # sp_feats = sp.SparseTensor(pred_wnf_grad_val,indices)
             sp_feats = vae(sp_feats)
             pred_val = sp_feats.feats.squeeze()
             
