@@ -24,78 +24,16 @@ from pathlib import Path
 import cc3d
 
 
-# class GridEncoder(nn.Module):
-#     def __init__(self):
-#         super(GridEncoder, self).__init__()
-#         encoder_cfg = json.load(open("/mnt/lizd/work/CG/NormalEstimation/iSDF/config/encoder_config.json")).get("model")
-#         config1 = encoder_cfg.get("SparseConv3dEncoder").get("args")
-#         self.ss_encoder = SparseStructureEncoder(**config1)
-
-#     def forward(self, x: torch.Tensor):
-#         x = self.ss_encoder(x)
-#         return x
-
-class SLatEncoder(nn.Module):
-    def __init__(self,in_dim: int):
-        super(SLatEncoder, self).__init__()
-        encoder_cfg = json.load(open("config/encoder_config.json")).get("model").get("SparseLatentEncoder").get("args")
-        self.input_dim = in_dim
-        self.input_transform = nn.Sequential(
-            lat_net.L_L_T(self.input_dim, encoder_cfg.get("in_channels")),
-            lat_net.L_L_T(encoder_cfg.get("in_channels"), encoder_cfg.get("in_channels")),
-        )
-        # TODO: 自制一个encoder（vae的encoder会加噪）
-        self.slat_encoder = lat_net.SLatEncoder(**encoder_cfg)
-
-    def forward(self, x: sp.SparseTensor):
-        x = self.input_transform(x)
-        return self.slat_encoder(x)
-
-
-class GridDecoder(nn.Module):
+class MixVoxelGridVAEBuilder(nn.Module):
     def __init__(self):
-        super(GridDecoder, self).__init__()
-    
-        ss_decoder_cfg = json.load(open("config/decoder_config.json")).get("model").get("SlatVoxelDecoder").get("args")
+        super(MixVoxelGridVAEBuilder, self).__init__()
+        _cfg = json.load(open("config/mixVoxelGridVAE.json"))
+        encoder_cfgs = _cfg.get("encoders")
+        decoder_config = _cfg.get("decoders")
+        self.model = lat_net.MixVoxelGridVAE(encoder_cfgs,decoder_config)
         
-        self.ss_decoder = lat_net.SLatVoxelDecoder(**ss_decoder_cfg)
-        self.activation = nn.Tanh()
-
-        
-    def forward(self, x):
-        x = self.ss_decoder(x)
-        feats = self.activation(x.feats)
-        x = x.replace(feats)
-        return x
-
-
-class VoxelGridVAEBuilder(nn.Module):
-    def __init__(self):
-        super(VoxelGridVAEBuilder, self).__init__()
-        config = json.load(open("config/voxelGridVAE.json")).get("model")    
-        input_channels = config.get("input_channels")
-        output_channels = config.get("output_channels")
-        encoder_config = config.get("SparseLatentEncoder").get("args")
-        decoder_config = config.get("SlatVoxelDecoder").get("args")
-    
-        encoder_config["in_channels"] = config.get("io_block_channels")[-1]
-        encoder_config["use_fp16"] = config.get("use_fp16")
-        decoder_config["use_fp16"] = config.get("use_fp16")
-        
-        self.model = lat_net.VoxelGridVAE(
-            input_channels=input_channels,
-            output_channels=output_channels,
-            num_io_res_blocks=config.get("num_io_res_blocks"),
-            io_block_channels=config.get("io_block_channels"),
-            use_fp16=config.get("use_fp16"),
-            model_channels=config.get("model_channels"),
-            use_skip_connections=config.get("use_skip_connections"),
-            encoder_config=encoder_config,
-            decoder_config=decoder_config
-        )
-        
-    def forward(self, x):
-        return self.model(x)
+    def forward(self, x_list):
+        return self.model(x_list)
 
 # --- Placeholder Helper Functions ---
 def compute_gt_sdf_grid(vertices, faces, R, device,masks):
@@ -1033,9 +971,7 @@ if __name__ == "__main__":
     print(f"Validation set size: {len(val_dataloader.dataset)}")
 
     # Initialize Models
-    # slat_encoder = SLatEncoder(in_dim=2).to(device)
-    # grid_decoder = GridDecoder().to(device)
-    vae = VoxelGridVAEBuilder().to(device)    
+    vae = MixVoxelGridVAEBuilder().to(device)
 
 
     # Optimizer
@@ -1195,28 +1131,23 @@ if __name__ == "__main__":
             gt_wnf_val = torch.tanh(gt_wnf_val)
             pred_wnf_grad_val = torch.tanh(pred_wnf_grad_val)
             
-            feats1 = wnf_val
-            feats1 = torch.tanh(feats1)
-            feats_acc = (feats1>0.0).squeeze().eq(gt_wnf_val>0.0).float().mean()
-            feats12 = torch.cat([pred_wnf_grad_val.unsqueeze(1),pred_udf_val.unsqueeze(1)],dim=1)
-            # feats12 = torch.cat([feats1.unsqueeze(1),pred_wnf_grad_val.unsqueeze(1)],dim=1)
-            sp_feats = sp.SparseTensor(feats12, indices)
-            # sp_feats = sp.SparseTensor(pred_wnf_grad_val,indices)
-            sp_feats = vae(sp_feats)
+            wnf_val_acc = (wnf_val>0.0).squeeze().eq(gt_wnf_val>0.0).float().mean()
+            feats_list = {}
+            feats_list["wnf_gradient_encoder"] = sp.SparseTensor(pred_wnf_grad_val.unsqueeze(1), indices)
+            feats_list["udf_val_encoder"] = sp.SparseTensor(pred_udf_val.unsqueeze(1), indices)
+            sp_feats = vae(feats_list)
             pred_val = sp_feats.feats.squeeze()
-            
-            # Log model graph to tensorboard (only once)
-            if not model_logged and batch_idx == 0 and epoch == 0:
-                try:
-                    # Create a sample input for graph logging
-                    sample_input = sp.SparseTensor(feats12[:100], indices[:100])  # Use first 100 points
-                    visualizer.writer.add_graph(vae, sample_input)
-                    model_logged = True
-                    print("Model graph added to TensorBoard")
-                except Exception as e:
-                    print(f"Could not add model graph to TensorBoard: {e}")
-                    model_logged = True  # Don't try again
-            
+            # # Log model graph to tensorboard (only once)
+            # if not model_logged and batch_idx == 0 and epoch == 0:
+            #     try:
+            #         # Create a sample input for graph logging
+            #         sample_input = sp.SparseTensor(feats12[:100], indices[:100])  # Use first 100 points
+            #         visualizer.writer.add_graph(vae, sample_input)
+            #         model_logged = True
+            #         print("Model graph added to TensorBoard")
+            #     except Exception as e:
+            #         print(f"Could not add model graph to TensorBoard: {e}")
+            #         model_logged = True  # Don't try again
             loss = loss_fn(pred_val, gt_wnf_val)
             optimizer.zero_grad()
             loss.backward()

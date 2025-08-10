@@ -1,0 +1,53 @@
+{
+    "name": "MixVoxelGridVAE",
+    "encoders": {
+        "udf_val_encoder": {
+            "input_channels": 1,
+            "num_io_res_blocks": 2,
+            "io_block_channels": [128],
+            "model_channels": 128,
+            "use_fp16": true,
+            "encoder_config": {
+                "in_channels": 1,
+                "model_channels": 768,
+                "latent_channels": 128,
+                "num_blocks": 12,
+                "num_heads": 12,
+                "mlp_ratio": 4,
+                "attn_mode": "swin",
+                "window_size": 8
+            }
+        },
+        "wnf_gradient_encoder": {
+            "input_channels": 1,
+            "num_io_res_blocks": 2,
+            "io_block_channels": [128],
+            "model_channels": 128,
+            "use_fp16": true,
+            "encoder_config": {
+                "in_channels": 1,
+                "model_channels": 768,
+                "latent_channels": 128,
+                "num_blocks": 12,
+                "num_heads": 12,
+                "mlp_ratio": 4,
+                "attn_mode": "swin",
+                "window_size": 8
+            }
+        }
+    },
+    "decoders": {
+        "model_channels": 512,
+        "output_channels": 128,
+        "num_io_res_blocks": 2,
+        "io_block_channels": [128],
+        "use_fp16": true,
+        "decoder_config": {
+            "model_channels": 512,
+            "latent_channels": 128,
+            "out_channels": 128,
+            "num_blocks": 8,
+            "num_heads": 8
+        }
+    }
+}
