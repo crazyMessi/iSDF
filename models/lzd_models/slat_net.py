@@ -411,20 +411,28 @@ class MixVoxelGridVAE(nn.Module):
     decoder_config: dict, 包含decoder的配置
     '''
     def __init__(self, 
+                 output_channels,
                  encoder_configs,
                  decoder_config,
                  ):
         super(MixVoxelGridVAE, self).__init__()
-
+        self.output_layer = sp.SparseLinear(decoder_config['output_channels'], output_channels)
         self.encoders = nn.ModuleDict()
         self.encoder_name_list = list(encoder_configs.keys())
         for name in encoder_configs:
             self.encoders[name] = VoxelGridEncoder(**encoder_configs[name])
         self.decoder = VoxelGridDecoder(**decoder_config)
-
-    def _concat_features(self, h_list):
-        # 将h_list中的feature拼接起来
-        return torch.cat(list(h_list.values()), dim=1)
+        # self.combine_feature = sp.SparseLinear(encoder_configs[self.encoder_name_list[0]]['model_channels']*len(self.encoder_name_list),
+        #                                        decoder_config['model_channels'])
+        # self.initialize_weights()
+        
+    # def initialize_weights(self) -> None:
+    #     def _basic_init(module):
+    #         if isinstance(module, nn.Linear):
+    #             torch.nn.init.xavier_uniform_(module.weight)
+    #             if module.bias is not None:
+    #                 nn.init.constant_(module.bias, 0)
+    #     self.apply(_basic_init)
 
     def forward(self, x_list):
         h_list = {}
@@ -432,6 +440,11 @@ class MixVoxelGridVAE(nn.Module):
             if name not in self.encoder_name_list:
                 raise ValueError(f"Encoder {name} not found in encoder list.")
             h_list[name] = self.encoders[name](x)
-        h = self.decoder(self._concat_features(h_list))
+        h = sp.sparse_cat(list(h_list.values()), dim=1)
+        # h = self.combine_feature(h)
+        h = self.decoder(h)
+        h = h.replace(F.layer_norm(h.feats, h.feats.shape[1:]))
+        h = self.output_layer(h.type(x_list[self.encoder_name_list[0]].dtype))
+        h = h.replace(torch.tanh(h.feats))
         return h
     

@@ -30,7 +30,7 @@ class MixVoxelGridVAEBuilder(nn.Module):
         _cfg = json.load(open("config/mixVoxelGridVAE.json"))
         encoder_cfgs = _cfg.get("encoders")
         decoder_config = _cfg.get("decoders")
-        self.model = lat_net.MixVoxelGridVAE(encoder_cfgs,decoder_config)
+        self.model = lat_net.MixVoxelGridVAE(_cfg["output_channels"],encoder_cfgs,decoder_config)
         
     def forward(self, x_list):
         return self.model(x_list)
@@ -1152,8 +1152,9 @@ if __name__ == "__main__":
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-            total_grad_norm_encoder = get_total_grad_norm(vae.model.ss_encoder)
-            total_grad_norm_decoder = get_total_grad_norm(vae.model.ss_decoder)
+            total_grad_norm_encoder = get_total_grad_norm(vae.model.encoders)
+            total_grad_norm_decoder = get_total_grad_norm(vae.model.decoder)
+            total_grad_norm = get_total_grad_norm(vae)
             
             # Calculate global step for logging
             global_step = epoch * len(train_dataloader) + batch_idx
@@ -1162,6 +1163,7 @@ if __name__ == "__main__":
             visualizer.writer.add_scalar('Train/Loss', loss.item(), global_step)
             visualizer.writer.add_scalar('Train/GradNorm_Encoder', total_grad_norm_encoder, global_step)
             visualizer.writer.add_scalar('Train/GradNorm_Decoder', total_grad_norm_decoder, global_step)
+            visualizer.writer.add_scalar('Train/GradNorm_Total', total_grad_norm, global_step)
             visualizer.writer.add_scalar('Train/Learning_Rate', optimizer.param_groups[0]['lr'], global_step)
             
             print(f"Epoch {epoch+1}/{cfg['epochs']}, Batch {batch_idx+1}/{len(train_dataloader)}, Loss: {loss.item():.6f}, encoder_Total_grad_norm: {total_grad_norm_encoder:.6f}, decoder_Total_grad_norm: {total_grad_norm_decoder:.6f}")
@@ -1177,14 +1179,18 @@ if __name__ == "__main__":
                 
                 # Use visualizer to save training batch results
                 visualizer.save_training_batch_results(
-                    epoch, batch_idx, loss.item(), acc.item(), feats_acc.item(),
+                    epoch, batch_idx, loss.item(), acc.item(), wnf_val_acc.item(),
                     total_grad_norm_encoder, total_grad_norm_decoder, global_step,
                     gt_sdf, pred_sdf, gt_wnf, pred_wnf_grad, masks,
                     vertices, faces, points, pred_normals, gt_normals, file_names=file_name
                 )
                 
-                print(f"Epoch {epoch+1}/{cfg['epochs']}, Batch {batch_idx+1}/{len(train_dataloader)}, Loss: {loss.item():.6f}, Acc: {acc.item():.6f}, Acc_wnf: {acc_wnf.item():.6f}, Loss_gt_wnf: {loss_gt_wnf.item():.6f}, Feats_acc: {feats_acc.item():.6f}")
-
+                print(f"Epoch {epoch+1}/{cfg['epochs']}, Batch {batch_idx+1}/{len(train_dataloader)}, Loss: {loss.item():.6f}, Acc: {acc.item():.6f}, Acc_wnf: {acc_wnf.item():.6f}, Loss_gt_wnf: {loss_gt_wnf.item():.6f}, wnf_val_acc: {wnf_val_acc.item():.6f}")
+        vaildation = False 
+        if not vaildation:
+            continue
+            
+        
         # Validation phase - 在每个epoch后运行验证
         print(f"\n🔍 Running validation for epoch {epoch+1}...")
         val_loss, val_acc, val_acc_wnf, val_feats_acc = validate_model(
