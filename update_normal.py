@@ -43,7 +43,7 @@ def dir_update_normal(points,mesh_vertices,mesh_faces,k=10):
     point_normals = point_normals / norms
     
     return point_normals
-    
+
 
 
 def compute_point_normals_from_mesh(points: np.ndarray, 

@@ -82,6 +82,11 @@ class L_L_T(nn.Module):
         nn.init.zeros_(self.linear.bias)
 
 # 线性+layer norm+tanh lizd
+'''
+in_channels: 输入的特征维度
+model_channels: transformer的特征维度
+latent_channels: 输出的潜变量维度 最后会*2 用于mean和logvar
+'''
 class SLatEncoder(SparseTransformerBase):
     def __init__(
         self,
@@ -286,4 +291,160 @@ class VoxelGridVAE(nn.Module):
         h = self.out_layer(h.type(x.dtype))
         h = h.replace(self.activation(h.feats))
         return h
+    
+class VoxelGridDecoder(nn.Module):
+    def __init__(self, 
+                 model_channels,
+                 output_channels,
+                 num_io_res_blocks,
+                 io_block_channels,
+                 use_fp16,
+                 decoder_config,
+                 ):
+        super(VoxelGridDecoder, self).__init__()
+        self.model_channels = model_channels
+        self.num_io_res_blocks = num_io_res_blocks
+        self.io_block_channels = io_block_channels
+        self.use_fp16 = use_fp16
+        
+        self.output_blocks = nn.ModuleList([])
+        for chs, prev_chs in zip(reversed(io_block_channels), [self.model_channels] + list(reversed(io_block_channels))[1:]):
+            self.output_blocks.append(
+                SparseResConv3d(
+                    prev_chs,
+                    chs,
+                    upsample=True
+                )
+            )
+            self.output_blocks.extend([
+                SparseResConv3d(chs,chs)
+                for _ in range(num_io_res_blocks-1)
+            ])
+            
+        self.out_layer = sp.SparseLinear(io_block_channels[0],output_channels)
+        self.ss_decoder = SLatVoxelDecoder(**decoder_config)
+        self.activation = nn.Tanh()
+        
+        if use_fp16:
+            self.convert_to_fp16()
+        
+    def convert_to_fp16(self):
+        # for block in self.output_blocks:
+        #     block.convert_to_fp16()
+        # self.ss_decoder.convert_to_fp16()
+        # self.out_layer.apply(convert_module_to_f16)
+        pass    
+    
+    def forward(self, x):
+        h = self.ss_decoder(x)
+        h = h.type(x.dtype)
+        
+        for block in self.output_blocks:
+            h = block(h)
+        h = h.replace(F.layer_norm(h.feats, h.feats.shape[1:]))
+        h = self.out_layer(h.type(x.dtype))
+        h = h.replace(self.activation(h.feats))
+        return h
 
+class VoxelGridEncoder(nn.Module):
+    '''
+    VoxelGridEncoder
+    input_channels: 输入的特征维度
+    model_channels: 降采样后的特征维度
+    num_io_res_blocks: 每个输入输出block的残差块数量
+    io_block_channels: 输入输出block的特征维度列表
+    encoder_config: dict, 包含SLatEncoder的配置
+    '''
+    def __init__(self, 
+                 input_channels, 
+                 model_channels,
+                 num_io_res_blocks,
+                 io_block_channels,
+                 use_fp16,
+                 encoder_config,
+                 ):
+        super(VoxelGridEncoder, self).__init__()
+        self.input_dim = input_channels
+        self.model_channels = model_channels
+        self.num_io_res_blocks = num_io_res_blocks
+        self.io_block_channels = io_block_channels
+        self.use_fp16 = use_fp16
+        
+        self.input_layer = sp.SparseLinear(input_channels,io_block_channels[0])
+        self.input_blocks = nn.ModuleList([])
+        for chs, next_chs in zip(io_block_channels, io_block_channels[1:] + [self.model_channels]):
+            self.input_blocks.extend([
+                SparseResConv3d(chs,chs) 
+                for _ in range(num_io_res_blocks-1)
+            ])
+            self.input_blocks.append(SparseResConv3d(chs,next_chs,downsample=True))
+        
+        self.ss_encoder = SLatEncoder(**encoder_config)
+        
+        if use_fp16:
+            self.convert_to_fp16()
+        
+    def convert_to_fp16(self):
+        # for block in self.input_blocks:
+        #     block.convert_to_fp16()
+        # self.ss_encoder.convert_to_fp16()
+        # self.input_layer.apply(convert_module_to_f16)
+        pass
+        
+    def forward(self, x):
+        h = self.input_layer(x)
+        for block in self.input_blocks:
+            h = block(h)
+        h = self.ss_encoder(h)
+        return h
+
+
+
+
+'''
+多个encoder 单个decoder
+要求每个encoder的输出特征维度相同
+'''
+class MixVoxelGridVAE(nn.Module):
+    '''
+    encoder_configs: List[dict] 
+    decoder_config: dict, 包含decoder的配置
+    '''
+    def __init__(self, 
+                 output_channels,
+                 encoder_configs,
+                 decoder_config,
+                 ):
+        super(MixVoxelGridVAE, self).__init__()
+        self.output_layer = sp.SparseLinear(decoder_config['output_channels'], output_channels)
+        self.encoders = nn.ModuleDict()
+        self.encoder_name_list = list(encoder_configs.keys())
+        for name in encoder_configs:
+            self.encoders[name] = VoxelGridEncoder(**encoder_configs[name])
+        self.decoder = VoxelGridDecoder(**decoder_config)
+        # self.combine_feature = sp.SparseLinear(encoder_configs[self.encoder_name_list[0]]['model_channels']*len(self.encoder_name_list),
+        #                                        decoder_config['model_channels'])
+        # self.initialize_weights()
+        
+    # def initialize_weights(self) -> None:
+    #     def _basic_init(module):
+    #         if isinstance(module, nn.Linear):
+    #             torch.nn.init.xavier_uniform_(module.weight)
+    #             if module.bias is not None:
+    #                 nn.init.constant_(module.bias, 0)
+    #     self.apply(_basic_init)
+
+    def forward(self, x_list):
+        h_list = {}
+        for name, x in x_list.items():
+            if name not in self.encoder_name_list:
+                raise ValueError(f"Encoder {name} not found in encoder list.")
+            h_list[name] = self.encoders[name](x)
+        h = sp.sparse_cat(list(h_list.values()), dim=1)
+        # h = self.combine_feature(h)
+        h = self.decoder(h)
+        h = h.replace(F.layer_norm(h.feats, h.feats.shape[1:]))
+        h = self.output_layer(h.type(x_list[self.encoder_name_list[0]].dtype))
+        h = h.replace(torch.tanh(h.feats))
+        return h
+    
