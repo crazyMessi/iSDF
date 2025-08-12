@@ -24,6 +24,131 @@ from pathlib import Path
 import cc3d
 
 
+def process_batch_data(points, gt_normals, vertices, faces, cfg, device, is_training=True):
+    """
+    统一的数据处理函数，用于训练和验证期间保持一致的行为
+    
+    Args:
+        points: (B, N_points, 3) 点云数据
+        gt_normals: (B, N_points, 3) 真实法向量
+        vertices: (B, N_verts, 3) 顶点数据
+        faces: (B, N_faces, 3) 面数据
+        cfg: 配置字典
+        device: 设备
+        is_training: 是否为训练模式
+    
+    Returns:
+        dict: 包含所有处理后的数据
+    """
+    B = points.shape[0]  # 批次大小
+    
+    # 1. 使用PCA估计法向量
+    pred_normals = estimate_normals_pca(points, k=cfg["pca_knn"]) # (B, N_points, 3)
+    
+    # 2. 如果是训练模式，计算voxel坐标（用于PointNet编码）
+    voxel_coords = None
+    if is_training:
+        voxel_coords = points.clone()
+        assert points.max() <= 1.0 and points.min() >= -1.0
+        voxel_coords = (voxel_coords+1.0)/2.0
+        voxel_coords = (voxel_coords*cfg["r"]).long()
+        
+        N = voxel_coords.shape[1]
+        batch_indices = torch.arange(B, device=voxel_coords.device).repeat_interleave(N).unsqueeze(-1)
+        voxel_coords = torch.cat([batch_indices, voxel_coords.reshape(-1, 3)], dim=-1).int()
+    
+    # 3. 创建均匀网格并初始化张量
+    i_resolu = cfg["r"]
+    o_resolu = cfg["R"]
+    voxel_center, grid_shape = tools.create_uniform_grid(i_resolu, bbox=np.array([[-1,1],[-1,1],[-1,1]]))
+    feat_shape = [B] + list(grid_shape)
+    
+    gt_wnf = torch.zeros(feat_shape, device=device)
+    pred_wnf = torch.zeros(feat_shape, device=device)
+    gt_sdf = torch.zeros(feat_shape, device=device)
+    gt_udf = torch.zeros(feat_shape, device=device)
+    pred_udf = torch.zeros(feat_shape, device=device)
+    pred_wnf_grad = torch.zeros(feat_shape, device=device)
+    masks = torch.zeros(feat_shape, device=device)
+    
+    # 4. 处理每个批次项
+    import cal_wnf
+    sdf_field = SDFField(i_resolu)
+    
+    for i in range(B):
+        mask = tools.create_mask_by_k(voxel_center, points[i].cpu().numpy(), k=cfg["k_for_mask"])    
+        t = cc3d.connected_components(mask.reshape(grid_shape))
+        if t.max() > 1:
+            print("Warning: connected components num of mask = {}".format(t.max()))
+        
+        query_points_i = voxel_center[mask]
+        mask_cuda = torch.from_numpy(mask).to(device).reshape(grid_shape)
+        masks[i] = mask_cuda
+        mask = mask.reshape(grid_shape)
+        query_points_i = torch.from_numpy(query_points_i).to(device)
+        
+        # 计算wnf
+        wnf_i = cal_wnf.compute_winding_number_torch_api(points[i], pred_normals[i], query_points_i, epsilon=1e-8, batch_size=10000)
+        gt_wnf_i = cal_wnf.compute_winding_number_torch_api(points[i], gt_normals[i], query_points_i, epsilon=1e-8, batch_size=10000)
+        pred_wnf[i][mask_cuda] = wnf_i
+        gt_wnf[i][mask_cuda] = gt_wnf_i
+        wnf_grad = tools.compute_gradient(pred_wnf[i], mask_cuda)
+        pred_wnf_grad[i][mask_cuda] = wnf_grad[mask_cuda]
+        
+        # 计算sdf
+        mesh_sdf = MeshSDF(vertices[i].cpu().numpy(), faces[i].cpu().numpy())
+        sdf_values = mesh_sdf.query(query_points_i.cpu().numpy())
+        gt_sdf[i][mask_cuda] = torch.from_numpy(sdf_values).to(device, dtype=torch.float32)
+        
+        # 计算udf
+        gt_udf[i][mask_cuda] = torch.abs(gt_sdf[i][mask_cuda])
+        pred_udf[i][mask_cuda] = torch.abs(sdf_field.compute_sdf(points[i], pred_normals[i], query_points_i))
+    
+    # 5. 收集稀疏索引和值
+    indices = torch.nonzero(masks).int()
+    gt_sdf_val = gt_sdf[indices[:,0], indices[:,1], indices[:,2], indices[:,3]]
+    gt_udf_val = gt_udf[indices[:,0], indices[:,1], indices[:,2], indices[:,3]]
+    pred_udf_val = pred_udf[indices[:,0], indices[:,1], indices[:,2], indices[:,3]]
+    wnf_val = pred_wnf[indices[:,0], indices[:,1], indices[:,2], indices[:,3]]
+    pred_wnf_grad_val = pred_wnf_grad[indices[:,0], indices[:,1], indices[:,2], indices[:,3]]
+    gt_wnf_val = gt_wnf[indices[:,0], indices[:,1], indices[:,2], indices[:,3]]
+    
+    # 应用tanh激活
+    wnf_val = torch.tanh(wnf_val)
+    gt_wnf_val = torch.tanh(gt_wnf_val)
+    pred_wnf_grad_val = torch.tanh(pred_wnf_grad_val)
+    
+    # 6. 计算特征准确率
+    wnf_val_acc = (wnf_val>0.0).squeeze().eq(gt_wnf_val>0.0).float().mean()
+    
+    # 7. 创建模型输入特征（使用字典格式，与训练保持一致）
+    feats_list = {}
+    feats_list["wnf_gradient_encoder"] = sp.SparseTensor(pred_wnf_grad_val.unsqueeze(1), indices)
+    feats_list["udf_val_encoder"] = sp.SparseTensor(pred_udf_val.unsqueeze(1), indices)
+    
+    # 8. 返回所有处理后的数据
+    return {
+        'voxel_coords': voxel_coords,
+        'pred_normals': pred_normals,
+        'gt_wnf': gt_wnf,
+        'pred_wnf': pred_wnf,
+        'gt_sdf': gt_sdf,
+        'gt_udf': gt_udf,
+        'pred_udf': pred_udf,
+        'pred_wnf_grad': pred_wnf_grad,
+        'masks': masks,
+        'indices': indices,
+        'gt_sdf_val': gt_sdf_val,
+        'gt_udf_val': gt_udf_val,
+        'pred_udf_val': pred_udf_val,
+        'wnf_val': wnf_val,
+        'pred_wnf_grad_val': pred_wnf_grad_val,
+        'gt_wnf_val': gt_wnf_val,
+        'wnf_val_acc': wnf_val_acc,
+        'feats_list': feats_list
+    }
+
+
 class MixVoxelGridVAEBuilder(nn.Module):
     def __init__(self):
         super(MixVoxelGridVAEBuilder, self).__init__()
@@ -766,97 +891,48 @@ def validate_model(model, val_dataloader, device, cfg, loss_fn, visualizer, epoc
             # 确保数据在正确的设备上
             points = points.to(device)         # (B, N_points, 3)
             
-            # === 使用与训练完全相同的数据处理流程 ===
+            # === 使用统一的数据处理函数 ===
+            batch_data = process_batch_data(points, gt_normals, vertices, faces, cfg, device, is_training=False)
             
-            # 1. 使用PCA估计法向量（与训练相同）
-            pred_normals = estimate_normals_pca(points, k=cfg["pca_knn"]) # (B, N_points, 3)
+            # 从batch_data中提取所需数据
+            pred_normals = batch_data['pred_normals']
+            gt_wnf = batch_data['gt_wnf']
+            pred_wnf = batch_data['pred_wnf']
+            gt_sdf = batch_data['gt_sdf']
+            gt_udf = batch_data['gt_udf']
+            pred_udf = batch_data['pred_udf']
+            pred_wnf_grad = batch_data['pred_wnf_grad']
+            masks = batch_data['masks']
+            indices = batch_data['indices']
+            gt_sdf_val = batch_data['gt_sdf_val']
+            gt_udf_val = batch_data['gt_udf_val']
+            pred_udf_val = batch_data['pred_udf_val']
+            wnf_val = batch_data['wnf_val']
+            pred_wnf_grad_val = batch_data['pred_wnf_grad_val']
+            gt_wnf_val = batch_data['gt_wnf_val']
+            wnf_val_acc = batch_data['wnf_val_acc']
+            feats_list = batch_data['feats_list']
             
-            # 2. 创建均匀网格并初始化张量（与训练相同）
-            i_resolu = cfg["r"]
-            o_resolu = cfg["R"]
-            voxel_center,grid_shape = tools.create_uniform_grid(i_resolu,bbox=np.array([[-1,1],[-1,1],[-1,1]]))
-            feat_shape = [B] + list(grid_shape)
-            gt_wnf = torch.zeros(feat_shape,device=device)
-            pred_wnf = torch.zeros(feat_shape,device=device)
-            gt_sdf = torch.zeros(feat_shape,device=device)
-            gt_udf = torch.zeros(feat_shape,device=device)
-            pred_udf = torch.zeros(feat_shape,device=device)
-            pred_wnf_grad = torch.zeros(feat_shape,device=device)
-            masks = torch.zeros(feat_shape,device=device)
-            
-            # 3. 处理每个批次项（与训练相同）
-            import cal_wnf
-            sdf_field = SDFField(i_resolu)
-            for i in range(B):
-                mask = tools.create_mask_by_k(voxel_center,points[i].cpu().numpy(),k=cfg["k_for_mask"])    
-                t  = cc3d.connected_components(mask.reshape(grid_shape))
-                if t.max() > 1:
-                    print("Warning: connected components num of mask = {}".format(t.max()))
-                query_points_i = voxel_center[mask]
-                mask_cuda = torch.from_numpy(mask).to(device).reshape(grid_shape)
-                masks[i] = mask_cuda
-                mask = mask.reshape(grid_shape)
-                query_points_i = torch.from_numpy(query_points_i).to(device)
-                pred_normals_i = pred_normals[i]
-                
-                # 计算wnf（与训练相同）
-                wnf_i = cal_wnf.compute_winding_number_torch_api(points[i],pred_normals[i],query_points_i,epsilon=1e-8,batch_size=10000)
-                gt_wnf_i = cal_wnf.compute_winding_number_torch_api(points[i],gt_normals[i],query_points_i,epsilon=1e-8,batch_size=10000)
-                pred_wnf[i][mask_cuda] = wnf_i
-                gt_wnf[i][mask_cuda] = gt_wnf_i
-                wnf_grad = tools.compute_gradient(pred_wnf[i],mask_cuda)
-                pred_wnf_grad[i][mask_cuda] = wnf_grad[mask_cuda]
-                
-                # 计算sdf（与训练相同）
-                mesh_sdf = MeshSDF(vertices[i].cpu().numpy(), faces[i].cpu().numpy())
-                sdf_values = mesh_sdf.query(query_points_i.cpu().numpy())
-                gt_sdf[i][mask_cuda] = torch.from_numpy(sdf_values).to(device,dtype=torch.float32)
-                
-                # 计算udf（与训练相同）
-                gt_udf[i][mask_cuda] = torch.abs(gt_sdf[i][mask_cuda])
-                pred_udf[i][mask_cuda] = torch.abs(sdf_field.compute_sdf(points[i],pred_normals[i],query_points_i))
-                
-            # 4. 收集稀疏索引和值（与训练相同）       
-            indices = torch.nonzero(masks).int()
-            gt_sdf_val = gt_sdf[indices[:,0],indices[:,1],indices[:,2],indices[:,3]]
-            gt_udf_val = gt_udf[indices[:,0],indices[:,1],indices[:,2],indices[:,3]]
-            pred_udf_val = pred_udf[indices[:,0],indices[:,1],indices[:,2],indices[:,3]]
-            wnf_val = pred_wnf[indices[:,0],indices[:,1],indices[:,2],indices[:,3]]
-            pred_wnf_grad_val = pred_wnf_grad[indices[:,0],indices[:,1],indices[:,2],indices[:,3]]
-            gt_wnf_val = gt_wnf[indices[:,0],indices[:,1],indices[:,2],indices[:,3]]
-            wnf_val = torch.tanh(wnf_val)
-            gt_wnf_val = torch.tanh(gt_wnf_val)
-            pred_wnf_grad_val = torch.tanh(pred_wnf_grad_val)
-            
-            # 5. 创建特征（与训练相同）
-            feats1 = wnf_val
-            feats1 = torch.tanh(feats1)
-            feats_acc = (feats1>0.0).squeeze().eq(gt_wnf_val>0.0).float().mean()
-            
-            feats12 = torch.cat([pred_udf_val.unsqueeze(1),pred_wnf_grad_val.unsqueeze(1)],dim=1)
-            
-            # 6. 通过模型前向传播（与训练相同）
-            pred_wnf_grad_val_input = pred_wnf_grad_val.squeeze().unsqueeze(1)
-            sp_feats = sp.SparseTensor(feats12,indices)
-            sp_feats = model(sp_feats)
+            # === 通过模型前向传播（与训练相同） ===
+            sp_feats = model(feats_list)
             pred_val = sp_feats.feats.squeeze()
             
-            # 7. 计算指标（与训练相同）
+            # === 计算指标（与训练相同） ===
             loss = loss_fn(pred_val, gt_wnf_val)
             acc = (pred_val>0.0).eq(gt_wnf_val>0.0).float().mean()
-            loss_gt_wnf = loss_fn(gt_wnf_val,gt_sdf_val)
+            loss_gt_wnf = loss_fn(gt_wnf_val, gt_sdf_val)
             acc_wnf = (gt_sdf_val>0.0).eq(gt_wnf_val>0.0).float().mean()
 
             total_loss += loss.item()
             total_acc += acc.item()
             total_acc_wnf += acc_wnf.item()
-            total_feats_acc += feats_acc.item()
+            total_feats_acc += wnf_val_acc.item()
             num_batches += 1
             
-            # 8. 保存验证结果（使用visualizer）
+            # === 保存验证结果（使用visualizer） ===
             # 创建完整的预测SDF网格
             pred_sdf = torch.zeros_like(gt_sdf)
-            pred_sdf[indices[:,0],indices[:,1],indices[:,2],indices[:,3]] = pred_val
+            pred_sdf[indices[:,0], indices[:,1], indices[:,2], indices[:,3]] = pred_val
             
             # 每隔一定间隔或最后几个批次保存详细结果
             save_this_batch = (
@@ -878,13 +954,13 @@ def validate_model(model, val_dataloader, device, cfg, loss_fn, visualizer, epoc
             # 进度输出
             print(f"  Val Batch {batch_idx+1}/{len(val_dataloader)}: "
                   f"Loss={loss.item():.4f}, Acc={acc.item():.4f}, "
-                  f"AccWNF={acc_wnf.item():.4f}, FeatsAcc={feats_acc.item():.4f}")
+                  f"AccWNF={acc_wnf.item():.4f}, FeatsAcc={wnf_val_acc.item():.4f}")
             
             # 为了节省时间，可以选择只验证部分批次
             if batch_idx >= cfg.get("max_val_batches", float('inf')) - 1:
                 break
 
-    # 9. 聚合统计
+    # === 聚合统计 ===
     avg_loss = total_loss / max(num_batches, 1)
     avg_acc = total_acc / max(num_batches, 1)
     avg_acc_wnf = total_acc_wnf / max(num_batches, 1)
@@ -1063,95 +1139,40 @@ if __name__ == "__main__":
             # Ensure data is on the correct device
             points = points.to(device)         # (B, N_points, 3)
 
-            # 1. Encode points with PointNet -> f1
-            voxel_coords = points.clone()
-            assert points.max() <= 1.0 and points.min() >= -1.0
-            voxel_coords = (voxel_coords+1.0)/2.0
-            voxel_coords = (voxel_coords*pointcloud_voxel_resolution).long()
-
-            B, N, _ = voxel_coords.shape
-            batch_indices = torch.arange(B, device=voxel_coords.device).repeat_interleave(N).unsqueeze(-1)  # [N*B, 1]
-            voxel_coords = torch.cat([batch_indices, voxel_coords.reshape(-1, 3)], dim=-1).int()  # [N*B, 4]
-            vae.train()   
-
-            pred_normals = estimate_normals_pca(points, k=cfg["pca_knn"]) # (B, N_points, 3)
-
-            i_resolu = cfg["r"]
-            o_resolu = cfg["R"]
-            voxel_center,grid_shape = tools.create_uniform_grid(i_resolu,bbox=np.array([[-1,1],[-1,1],[-1,1]]))
-            feat_shape = [B] + list(grid_shape)
-            gt_wnf = torch.zeros(feat_shape,device=device)
-            pred_wnf = torch.zeros(feat_shape,device=device)
-            gt_sdf = torch.zeros(feat_shape,device=device)
-            gt_udf = torch.zeros(feat_shape,device=device)
-            pred_udf = torch.zeros(feat_shape,device=device)
-            pred_wnf_grad = torch.zeros(feat_shape,device=device)
-            masks = torch.zeros(feat_shape,device=device)
+            # === 使用统一的数据处理函数 ===
+            batch_data = process_batch_data(points, gt_normals, vertices, faces, cfg, device, is_training=True)
             
-            import cal_wnf
-            sdf_field = SDFField(i_resolu)
-            for i in range(B):
-                mask = tools.create_mask_by_k(voxel_center,points[i].cpu().numpy(),k=cfg["k_for_mask"])    
-                t  = cc3d.connected_components(mask.reshape(grid_shape))
-                if t.max() > 1:
-                    print("Warning: connected components num of mask = {}".format(t.max()))
-                query_points_i = voxel_center[mask]
-                mask_cuda = torch.from_numpy(mask).to(device).reshape(grid_shape)
-                masks[i] = mask_cuda
-                mask = mask.reshape(grid_shape)
-                query_points_i = torch.from_numpy(query_points_i).to(device)
-                pred_normals_i = pred_normals[i]
-                
-                # 计算wnf
-                wnf_i = cal_wnf.compute_winding_number_torch_api(points[i],pred_normals[i],query_points_i,epsilon=1e-8,batch_size=10000)
-                gt_wnf_i = cal_wnf.compute_winding_number_torch_api(points[i],gt_normals[i],query_points_i,epsilon=1e-8,batch_size=10000)
-                pred_wnf[i][mask_cuda] = wnf_i
-                gt_wnf[i][mask_cuda] = gt_wnf_i
-                wnf_grad = tools.compute_gradient(pred_wnf[i],mask_cuda)
-                pred_wnf_grad[i][mask_cuda] = wnf_grad[mask_cuda]
-                
-                # 计算sdf
-                mesh_sdf = MeshSDF(vertices[i].cpu().numpy(), faces[i].cpu().numpy())
-                sdf_values = mesh_sdf.query(query_points_i.cpu().numpy())
-                gt_sdf[i][mask_cuda] = torch.from_numpy(sdf_values).to(device,dtype=torch.float32)
-                
-                # 计算udf
-                gt_udf[i][mask_cuda] = torch.abs(gt_sdf[i][mask_cuda])
-                pred_udf[i][mask_cuda] = torch.abs(sdf_field.compute_sdf(points[i],pred_normals[i],query_points_i))
-                
-                
-            indices = torch.nonzero(masks).int()
-            gt_sdf_val = gt_sdf[indices[:,0],indices[:,1],indices[:,2],indices[:,3]]
-            gt_udf_val = gt_udf[indices[:,0],indices[:,1],indices[:,2],indices[:,3]]
-            pred_udf_val = pred_udf[indices[:,0],indices[:,1],indices[:,2],indices[:,3]]
-            wnf_val = pred_wnf[indices[:,0],indices[:,1],indices[:,2],indices[:,3]]
-            pred_wnf_grad_val = pred_wnf_grad[indices[:,0],indices[:,1],indices[:,2],indices[:,3]]
-            gt_wnf_val = gt_wnf[indices[:,0],indices[:,1],indices[:,2],indices[:,3]]
-            wnf_val = torch.tanh(wnf_val)
-            gt_wnf_val = torch.tanh(gt_wnf_val)
-            pred_wnf_grad_val = torch.tanh(pred_wnf_grad_val)
+            # 从batch_data中提取所需数据
+            voxel_coords = batch_data['voxel_coords']
+            pred_normals = batch_data['pred_normals']
+            gt_wnf = batch_data['gt_wnf']
+            pred_wnf = batch_data['pred_wnf']
+            gt_sdf = batch_data['gt_sdf']
+            gt_udf = batch_data['gt_udf']
+            pred_udf = batch_data['pred_udf']
+            pred_wnf_grad = batch_data['pred_wnf_grad']
+            masks = batch_data['masks']
+            indices = batch_data['indices']
+            gt_sdf_val = batch_data['gt_sdf_val']
+            gt_udf_val = batch_data['gt_udf_val']
+            pred_udf_val = batch_data['pred_udf_val']
+            wnf_val = batch_data['wnf_val']
+            pred_wnf_grad_val = batch_data['pred_wnf_grad_val']
+            gt_wnf_val = batch_data['gt_wnf_val']
+            wnf_val_acc = batch_data['wnf_val_acc']
+            feats_list = batch_data['feats_list']
             
-            wnf_val_acc = (wnf_val>0.0).squeeze().eq(gt_wnf_val>0.0).float().mean()
-            feats_list = {}
-            feats_list["wnf_gradient_encoder"] = sp.SparseTensor(pred_wnf_grad_val.unsqueeze(1), indices)
-            feats_list["udf_val_encoder"] = sp.SparseTensor(pred_udf_val.unsqueeze(1), indices)
+            # === 通过模型前向传播 ===
             sp_feats = vae(feats_list)
             pred_val = sp_feats.feats.squeeze()
-            # # Log model graph to tensorboard (only once)
-            # if not model_logged and batch_idx == 0 and epoch == 0:
-            #     try:
-            #         # Create a sample input for graph logging
-            #         sample_input = sp.SparseTensor(feats12[:100], indices[:100])  # Use first 100 points
-            #         visualizer.writer.add_graph(vae, sample_input)
-            #         model_logged = True
-            #         print("Model graph added to TensorBoard")
-            #     except Exception as e:
-            #         print(f"Could not add model graph to TensorBoard: {e}")
-            #         model_logged = True  # Don't try again
+            
+            # === 计算损失和反向传播 ===
             loss = loss_fn(pred_val, gt_wnf_val)
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
+            
+            # === 计算梯度范数 ===
             total_grad_norm_encoder = get_total_grad_norm(vae.model.encoders)
             total_grad_norm_decoder = get_total_grad_norm(vae.model.decoder)
             total_grad_norm = get_total_grad_norm(vae)
@@ -1170,12 +1191,12 @@ if __name__ == "__main__":
 
             if batch_idx % cfg["log_interval"] == 0:
                 acc = (pred_val>0.0).eq(gt_wnf_val>0.0).float().mean()
-                loss_gt_wnf = loss_fn(gt_wnf_val,gt_sdf_val)
+                loss_gt_wnf = loss_fn(gt_wnf_val, gt_sdf_val)
                 acc_wnf = (gt_sdf_val>0.0).eq(gt_wnf_val>0.0).float().mean()
                 
                 # Create pred_sdf for visualization
                 pred_sdf = torch.zeros_like(gt_sdf)
-                pred_sdf[indices[:,0],indices[:,1],indices[:,2],indices[:,3]] = pred_val
+                pred_sdf[indices[:,0], indices[:,1], indices[:,2], indices[:,3]] = pred_val
                 
                 # Use visualizer to save training batch results
                 visualizer.save_training_batch_results(
@@ -1186,8 +1207,10 @@ if __name__ == "__main__":
                 )
                 
                 print(f"Epoch {epoch+1}/{cfg['epochs']}, Batch {batch_idx+1}/{len(train_dataloader)}, Loss: {loss.item():.6f}, Acc: {acc.item():.6f}, Acc_wnf: {acc_wnf.item():.6f}, Loss_gt_wnf: {loss_gt_wnf.item():.6f}, wnf_val_acc: {wnf_val_acc.item():.6f}")
-        vaildation = False 
-        if not vaildation:
+        
+        # 启用验证
+        validation = True 
+        if not validation:
             continue
             
         
