@@ -9,7 +9,16 @@ from ..trellis.models.structured_latent_vae.base import SparseTransformerBase
 from ..trellis.models.structured_latent_flow import SparseResBlock3d
 from ..trellis.modules.norm import LayerNorm32
 
-
+class ShiftedSigmoid(nn.Module):
+    def __init__(self):
+        super(ShiftedSigmoid, self).__init__()
+        # Shift sigmoid to range [-1, 1]
+        # Sigmoid outputs in range [0, 1], so we shift it to [-1, 1]
+        # y = sigmoid(x) * 2 - 1
+        # This is equivalent to scaling the output of sigmoid by 2 and then shifting it by -1
+    def forward(self, x):
+        return torch.sigmoid(x)*2 - 1  # Shift sigmoid to range [-1, 1]
+        
 
 '''
 相当于SparseResBlock3d，但是没有emb
@@ -59,29 +68,7 @@ class SparseResConv3d(nn.Module):
         h = self.conv2(h)
         h = h + self.skip_connection(x)
         return h
-    
-# 线性+layer norm+tanh lizd
-class L_L_T(nn.Module):
-    def __init__(self, in_features, out_features, bias=True):
-        super(L_L_T, self).__init__()
-        self.in_features = in_features
-        self.out_features = out_features
-        self.bias = bias
-        self.linear = nn.Linear(in_features, out_features, bias)
-        self.norm = nn.LayerNorm(out_features)
-        self.activate = nn.Tanh()
 
-    def forward(self, input: sp.SparseTensor) -> sp.SparseTensor:
-        return input.replace(self.activate(self.norm(self.linear(input.feats))))
-    
-    def convert_to_fp16(self):
-        self.apply(convert_module_to_f16)
-    
-    def initialize_weights(self) -> None:
-        nn.init.xavier_uniform_(self.linear.weight)
-        nn.init.zeros_(self.linear.bias)
-
-# 线性+layer norm+tanh lizd
 '''
 in_channels: 输入的特征维度
 model_channels: transformer的特征维度
@@ -256,11 +243,12 @@ class VoxelGridVAE(nn.Module):
         self.ss_encoder = SLatEncoder(**encoder_config)
         self.ss_decoder = SLatVoxelDecoder(**decoder_config)
         
-        self.activation = nn.Tanh()
+        self.activation = ShiftedSigmoid()  # Shifted sigmoid to range [-1, 1]
         
         if use_fp16:
             self.convert_to_fp16()
-        
+    
+
     def convert_to_fp16(self):
         # for block in self.input_blocks:
         #     block.convert_to_fp16()
@@ -323,7 +311,7 @@ class VoxelGridDecoder(nn.Module):
             
         self.out_layer = sp.SparseLinear(io_block_channels[0],output_channels)
         self.ss_decoder = SLatVoxelDecoder(**decoder_config)
-        self.activation = nn.Tanh()
+        self.activation = ShiftedSigmoid()  # Shifted sigmoid to range [-1, 1]
         
         if use_fp16:
             self.convert_to_fp16()
@@ -422,6 +410,7 @@ class MixVoxelGridVAE(nn.Module):
         for name in encoder_configs:
             self.encoders[name] = VoxelGridEncoder(**encoder_configs[name])
         self.decoder = VoxelGridDecoder(**decoder_config)
+        self.activation = ShiftedSigmoid()  # Shifted sigmoid to range [-1, 1]
         # self.combine_feature = sp.SparseLinear(encoder_configs[self.encoder_name_list[0]]['model_channels']*len(self.encoder_name_list),
         #                                        decoder_config['model_channels'])
         # self.initialize_weights()
@@ -445,6 +434,6 @@ class MixVoxelGridVAE(nn.Module):
         h = self.decoder(h)
         h = h.replace(F.layer_norm(h.feats, h.feats.shape[1:]))
         h = self.output_layer(h.type(x_list[self.encoder_name_list[0]].dtype))
-        h = h.replace(torch.tanh(h.feats))
+        h = h.replace(self.activation(h.feats))
         return h
     

@@ -217,11 +217,19 @@ def estimate_normals_pca(points, k):
 class CustomLoss(nn.Module):
     def __init__(self):
         super(CustomLoss, self).__init__()
+        self.balance_loss = BanlenceLoss()
+        self.balance_loss_weight = 500
         
     def forward(self, pred, target):
         loss = 1 - torch.abs(torch.mean(pred*target))
-        return loss * 1000
+        return loss * 1000 + self.balance_loss_weight * self.balance_loss(pred, target)
 
+class BanlenceLoss(nn.Module):
+    def __init__(self):
+        super(BanlenceLoss, self).__init__()
+    def forward(self, pred, target):
+        return torch.abs(torch.abs(torch.mean(pred))-torch.abs(torch.mean(target)))
+    
 class MyL1Loss(nn.Module):
     def __init__(self):
         super(MyL1Loss, self).__init__()
@@ -1208,10 +1216,18 @@ if __name__ == "__main__":
                 
                 print(f"Epoch {epoch+1}/{cfg['epochs']}, Batch {batch_idx+1}/{len(train_dataloader)}, Loss: {loss.item():.6f}, Acc: {acc.item():.6f}, Acc_wnf: {acc_wnf.item():.6f}, Loss_gt_wnf: {loss_gt_wnf.item():.6f}, wnf_val_acc: {wnf_val_acc.item():.6f}")
         
-        # 启用验证
-        validation = True 
-        if not validation:
-            continue
+        from git_backup import backup_git_tracked_files
+
+        # Backup git tracked files after the first epoch
+        if epoch == 0:
+            print("🔄 Backing up git tracked files...")
+            # 位置在experiment目录下的backups子目录
+            backup_dir = backup_git_tracked_files(
+                backup_dir=visualizer.output_dir / 'backups',
+                exclude_patterns=['.pyc', '__pycache__', '.git'],
+                size_limit_mb=100.0,
+                auto_confirm=True
+            )
             
         
         # Validation phase - 在每个epoch后运行验证
